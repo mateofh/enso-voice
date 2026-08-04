@@ -163,8 +163,11 @@ export const CACHE_CONFIG = {
   PASTE_DELAY_MS: 50, // Delay before paste simulation to allow clipboard to settle
 } as const;
 
-// OpenWhispr Cloud API
-export const OPENWHISPR_API_URL = (env.VITE_OPENWHISPR_API_URL as string) || "";
+// Enso Voice API. Keep the legacy environment variable as a transition path
+// for upstream modules and existing developer environments.
+export const ENSO_API_URL =
+  (env.VITE_ENSO_API_URL as string) || (env.VITE_OPENWHISPR_API_URL as string) || "";
+export const OPENWHISPR_API_URL = ENSO_API_URL;
 
 // Retry Configuration
 export const RETRY_CONFIG = {

@@ -80,8 +80,6 @@ const ReferralModal = React.lazy(() => import("./ReferralModal"));
 const PersonalNotesView = React.lazy(() => import("./notes/PersonalNotesView"));
 const DictionaryView = React.lazy(() => import("./DictionaryView"));
 const UploadAudioView = React.lazy(() => import("./notes/UploadAudioView"));
-const IntegrationsView = React.lazy(() => import("./IntegrationsView"));
-const ChatView = React.lazy(() => import("./chat/ChatView"));
 const CommandSearch = React.lazy(() => import("./CommandSearch"));
 
 interface ControlPanelProps {
@@ -1105,11 +1103,6 @@ export default function ControlPanel({ initialSettingsSection }: ControlPanelPro
                 }}
               />
             )}
-            {activeView === "chat" && (
-              <Suspense fallback={null}>
-                <ChatView />
-              </Suspense>
-            )}
             {activeView === "personal-notes" && (
               <Suspense fallback={null}>
                 <PersonalNotesView
@@ -1140,17 +1133,6 @@ export default function ControlPanel({ initialSettingsSection }: ControlPanelPro
                   }}
                   onOpenSettings={(section) => {
                     setSettingsSection(section);
-                    setShowSettings(true);
-                  }}
-                />
-              </Suspense>
-            )}
-            {activeView === "integrations" && (
-              <Suspense fallback={null}>
-                <IntegrationsView
-                  isPaid={!!(usage?.isSubscribed || usage?.isTrial)}
-                  onUpgrade={() => {
-                    setSettingsSection("plansBilling");
                     setShowSettings(true);
                   }}
                 />

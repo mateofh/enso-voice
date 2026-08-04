@@ -1,8 +1,10 @@
 const OPENWHISPR_HOST_PATTERNS = [
-  "https://auth.openwhispr.com/*",
-  "https://api.openwhispr.com/*",
+  "https://auth.ensovoice.com/*",
+  "https://api.ensovoice.com/*",
   "http://localhost:3000/*",
   "http://127.0.0.1:3000/*",
+  "http://localhost:8787/*",
+  "http://127.0.0.1:8787/*",
 ];
 
 // Electron's file:// renderer sends Origin: null, which Better Auth's

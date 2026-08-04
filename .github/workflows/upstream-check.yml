@@ -1,0 +1,30 @@
+name: Upstream drift check
+
+on:
+  schedule:
+    - cron: "17 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch OpenWhispr upstream
+        run: git fetch https://github.com/OpenWhispr/openwhispr.git main:refs/remotes/upstream/main
+      - name: Report drift
+        shell: bash
+        run: |
+          behind=$(git rev-list --count HEAD..upstream/main)
+          ahead=$(git rev-list --count upstream/main..HEAD)
+          {
+            echo "## Upstream status"
+            echo ""
+            echo "Enso is **${behind}** commit(s) behind and **${ahead}** commit(s) ahead of OpenWhispr main."
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$behind" -eq 0

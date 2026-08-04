@@ -3,6 +3,13 @@ import { useAuth } from "./useAuth";
 import { CACHE_CONFIG } from "../config/constants";
 import { withSessionRefresh } from "../lib/auth";
 import { writeIsSubscribed } from "../lib/subscriptionFlag";
+import {
+  FREE_ENTITLEMENT,
+  hasCapability,
+  type Capability,
+  type CreditBalance,
+  type Entitlement,
+} from "../types/entitlements";
 
 interface UsageData {
   wordsUsed: number;
@@ -19,7 +26,11 @@ interface UsageData {
   entitlementSources: {
     personal: boolean;
     workspaceIds: string[];
+    community?: boolean;
+    internal?: boolean;
   };
+  entitlement: Entitlement;
+  credits: CreditBalance | null;
 }
 
 interface UseUsageResult {
@@ -32,6 +43,9 @@ interface UseUsageResult {
   isSubscribed: boolean;
   isPersonallySubscribed: boolean;
   entitledWorkspaceIds: string[];
+  entitlement: Entitlement;
+  credits: CreditBalance | null;
+  hasCapability: (capability: Capability) => boolean;
   isTrial: boolean;
   trialDaysLeft: number | null;
   currentPeriodEnd: string | null;
@@ -90,13 +104,17 @@ export function useUsage(): UseUsageResult | null {
       await withSessionRefresh(async () => {
         const result = await window.electronAPI.cloudUsage();
         if (result.success) {
+          const entitlement = result.entitlement ?? FREE_ENTITLEMENT;
+          const entitled =
+            result.isSubscribed ??
+            (entitlement.tier === "pro" && ["active", "grace"].includes(entitlement.status));
           setData({
             wordsUsed: result.wordsUsed ?? 0,
             wordsRemaining: result.wordsRemaining ?? 0,
             limit: result.limit ?? 2000,
             plan: result.plan ?? "free",
             status: result.status ?? "active",
-            isSubscribed: result.isSubscribed ?? false,
+            isSubscribed: entitled,
             isTrial: result.isTrial ?? false,
             trialDaysLeft: result.trialDaysLeft ?? null,
             currentPeriodEnd: result.currentPeriodEnd ?? null,
@@ -109,9 +127,11 @@ export function useUsage(): UseUsageResult | null {
                   ["active", "trialing"].includes(result.status ?? "active")),
               workspaceIds: [],
             },
+            entitlement,
+            credits: result.credits ?? null,
           });
           lastFetchRef.current = Date.now();
-          writeIsSubscribed(result.isSubscribed ?? false);
+          writeIsSubscribed(entitled);
         } else {
           const error: any = new Error(result.error || "Failed to fetch usage");
           error.code = result.code;
@@ -268,8 +288,18 @@ export function useUsage(): UseUsageResult | null {
   const isPersonallySubscribed = data?.entitlementSources.personal ?? false;
   const status = data?.status ?? "active";
   const isPastDue = PAID_PLANS.has(data?.plan ?? "free") && status === "past_due";
-  const isOverLimit = !isSubscribed && limit > 0 && wordsUsed >= limit;
-  const isApproachingLimit = !isSubscribed && limit > 0 && wordsUsed >= limit * 0.8 && !isOverLimit;
+  const credits = data?.credits ?? null;
+  const creditPercentage =
+    credits && credits.granted > 0
+      ? Math.max(0, credits.remainingSeconds / (credits.granted * 60))
+      : null;
+  const isOverLimit = credits
+    ? credits.remainingSeconds <= 0
+    : !isSubscribed && limit > 0 && wordsUsed >= limit;
+  const isApproachingLimit = credits
+    ? creditPercentage !== null && creditPercentage <= 0.25 && !isOverLimit
+    : !isSubscribed && limit > 0 && wordsUsed >= limit * 0.8 && !isOverLimit;
+  const entitlement = data?.entitlement ?? FREE_ENTITLEMENT;
 
   return {
     plan: data?.plan ?? "free",
@@ -281,6 +311,9 @@ export function useUsage(): UseUsageResult | null {
     isSubscribed,
     isPersonallySubscribed,
     entitledWorkspaceIds: data?.entitlementSources.workspaceIds ?? [],
+    entitlement,
+    credits,
+    hasCapability: (capability) => hasCapability(entitlement, capability),
     isTrial: data?.isTrial ?? false,
     trialDaysLeft: data?.trialDaysLeft ?? null,
     currentPeriodEnd: data?.currentPeriodEnd ?? null,

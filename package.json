@@ -1,7 +1,7 @@
 {
-  "name": "open-whispr",
-  "version": "1.8.1",
-  "description": "A desktop dictation application using whisper.cpp for speech-to-text transcription",
+  "name": "enso-voice",
+  "version": "0.1.0-beta.1",
+  "description": "Privacy-first desktop dictation, meeting notes, and voice workflows for the Enso community",
   "main": "main.js",
   "private": true,
   "engines": {
@@ -89,8 +89,8 @@
     "desktop-app"
   ],
   "author": {
-    "name": "OpenWhispr Team",
-    "email": "support@openwhispr.com"
+    "name": "Enso",
+    "email": "support@ensovoice.com"
   },
   "license": "MIT",
   "devDependencies": {
@@ -127,7 +127,10 @@
     "@ai-sdk/provider": "^3.0.14",
     "@aws-sdk/client-bedrock": "^3.1090.0",
     "@aws-sdk/credential-providers": "^3.1029.0",
-    "@better-auth/sso": "1.6.19",
+    "@better-auth/sso": "1.6.25",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@homebridge/dbus-native": "^0.7.7",
     "@napi-rs/keyring": "^1.3.0",
     "@qdrant/js-client-rest": "^1.12.0",
     "@radix-ui/react-accordion": "^1.1.2",
@@ -147,11 +150,10 @@
     "@tiptap/react": "3.22.5",
     "@tiptap/starter-kit": "3.22.5",
     "ai": "^6.0.116",
-    "better-auth": "1.6.19",
+    "better-auth": "1.6.25",
     "better-sqlite3": "12.9.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "@homebridge/dbus-native": "^0.7.7",
     "dotenv": "^17.4.1",
     "electron-updater": "^6.6.2",
     "ffmpeg-static": "^5.2.0",

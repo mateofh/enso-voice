@@ -17,6 +17,7 @@ import logoIcon from "../assets/icon.png";
 import logger from "../utils/logger";
 import { getCachedPlatform } from "../utils/platform";
 import ForgotPasswordView from "./ForgotPasswordView";
+import { ENSO_BETA_FEATURES } from "../config/product";
 
 interface AuthenticationStepProps {
   onContinueWithoutAccount?: () => void;
@@ -299,7 +300,7 @@ export default function AuthenticationStep({
         <div className="text-center mb-4">
           <img
             src={logoIcon}
-            alt="OpenWhispr"
+            alt="Enso Voice"
             className="w-12 h-12 mx-auto mb-2.5 rounded-lg shadow-sm"
           />
           <p className="text-lg font-semibold text-foreground tracking-tight leading-tight">
@@ -333,7 +334,7 @@ export default function AuthenticationStep({
         <div className="text-center mb-4">
           <img
             src={logoIcon}
-            alt="OpenWhispr"
+            alt="Enso Voice"
             className="w-12 h-12 mx-auto mb-2.5 rounded-lg shadow-sm"
           />
           <div className="w-5 h-5 mx-auto bg-success/10 rounded-full flex items-center justify-center mb-2">
@@ -488,7 +489,7 @@ export default function AuthenticationStep({
       <div className="text-center mb-4">
         <img
           src={logoIcon}
-          alt="OpenWhispr"
+          alt="Enso Voice"
           className="w-12 h-12 mx-auto mb-2.5 rounded-lg shadow-sm"
         />
         <p className="text-lg font-semibold text-foreground tracking-tight leading-tight">
@@ -499,7 +500,7 @@ export default function AuthenticationStep({
         </p>
       </div>
 
-      {isMacOS && (
+      {ENSO_BETA_FEATURES.socialAuth && isMacOS && (
         <Button
           type="button"
           variant="social"
@@ -526,69 +527,75 @@ export default function AuthenticationStep({
         </Button>
       )}
 
-      <Button
-        type="button"
-        variant="social"
-        onClick={() => handleSocialSignIn("google")}
-        disabled={
-          isSocialLoading !== null || isCheckingEmail || isSSOLoading || !oauthProtocolRegistered
-        }
-        title={!oauthProtocolRegistered ? t("auth.social.protocolUnavailable") : undefined}
-        className="w-full h-9"
-      >
-        {isSocialLoading === "google" ? (
-          <>
-            <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-            <span className="text-sm font-medium text-muted-foreground">
-              {t("auth.social.completeInBrowser")}
-            </span>
-          </>
-        ) : (
-          <>
-            <GoogleIcon className="w-4 h-4" />
-            <span className="text-sm font-medium">{t("auth.social.continueWithGoogle")}</span>
-          </>
-        )}
-      </Button>
+      {ENSO_BETA_FEATURES.socialAuth && (
+        <Button
+          type="button"
+          variant="social"
+          onClick={() => handleSocialSignIn("google")}
+          disabled={
+            isSocialLoading !== null || isCheckingEmail || isSSOLoading || !oauthProtocolRegistered
+          }
+          title={!oauthProtocolRegistered ? t("auth.social.protocolUnavailable") : undefined}
+          className="w-full h-9"
+        >
+          {isSocialLoading === "google" ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+              <span className="text-sm font-medium text-muted-foreground">
+                {t("auth.social.completeInBrowser")}
+              </span>
+            </>
+          ) : (
+            <>
+              <GoogleIcon className="w-4 h-4" />
+              <span className="text-sm font-medium">{t("auth.social.continueWithGoogle")}</span>
+            </>
+          )}
+        </Button>
+      )}
 
-      <Button
-        type="button"
-        variant="social"
-        onClick={() => handleSocialSignIn("microsoft")}
-        disabled={
-          isSocialLoading !== null || isCheckingEmail || isSSOLoading || !oauthProtocolRegistered
-        }
-        title={!oauthProtocolRegistered ? t("auth.social.protocolUnavailable") : undefined}
-        className="w-full h-9"
-      >
-        {isSocialLoading === "microsoft" ? (
-          <>
-            <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-            <span className="text-sm font-medium text-muted-foreground">
-              {t("auth.social.completeInBrowser")}
-            </span>
-          </>
-        ) : (
-          <>
-            <MicrosoftIcon className="w-4 h-4" />
-            <span className="text-sm font-medium">{t("auth.social.continueWithMicrosoft")}</span>
-          </>
-        )}
-      </Button>
+      {ENSO_BETA_FEATURES.socialAuth && (
+        <Button
+          type="button"
+          variant="social"
+          onClick={() => handleSocialSignIn("microsoft")}
+          disabled={
+            isSocialLoading !== null || isCheckingEmail || isSSOLoading || !oauthProtocolRegistered
+          }
+          title={!oauthProtocolRegistered ? t("auth.social.protocolUnavailable") : undefined}
+          className="w-full h-9"
+        >
+          {isSocialLoading === "microsoft" ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+              <span className="text-sm font-medium text-muted-foreground">
+                {t("auth.social.completeInBrowser")}
+              </span>
+            </>
+          ) : (
+            <>
+              <MicrosoftIcon className="w-4 h-4" />
+              <span className="text-sm font-medium">{t("auth.social.continueWithMicrosoft")}</span>
+            </>
+          )}
+        </Button>
+      )}
 
-      {!oauthProtocolRegistered && (
+      {ENSO_BETA_FEATURES.socialAuth && !oauthProtocolRegistered && (
         <p className="text-xs text-muted-foreground/80 leading-tight text-center">
           {t("auth.social.protocolUnavailable")}
         </p>
       )}
 
-      <div className="flex items-center gap-2">
-        <div className="flex-1 h-px bg-border/50" />
-        <span className="text-xs font-medium text-muted-foreground/40 uppercase tracking-widest px-1">
-          {t("auth.common.or")}
-        </span>
-        <div className="flex-1 h-px bg-border/50" />
-      </div>
+      {ENSO_BETA_FEATURES.socialAuth && (
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-px bg-border/50" />
+          <span className="text-xs font-medium text-muted-foreground/40 uppercase tracking-widest px-1">
+            {t("auth.common.or")}
+          </span>
+          <div className="flex-1 h-px bg-border/50" />
+        </div>
+      )}
 
       <form
         onSubmit={(e) => {
@@ -623,23 +630,25 @@ export default function AuthenticationStep({
         </Button>
       </form>
 
-      <button
-        type="button"
-        onClick={handleSSOSignIn}
-        disabled={
-          isSocialLoading !== null || isCheckingEmail || isSSOLoading || !oauthProtocolRegistered
-        }
-        className="w-full text-center text-xs text-muted-foreground/85 hover:text-foreground transition-colors py-1.5 rounded hover:bg-muted/30 disabled:opacity-50 disabled:pointer-events-none flex items-center justify-center gap-1.5"
-      >
-        {isSSOLoading ? (
-          <>
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            {t("auth.social.completeInBrowser")}
-          </>
-        ) : (
-          t("auth.sso.continueWithSSO")
-        )}
-      </button>
+      {ENSO_BETA_FEATURES.sso && (
+        <button
+          type="button"
+          onClick={handleSSOSignIn}
+          disabled={
+            isSocialLoading !== null || isCheckingEmail || isSSOLoading || !oauthProtocolRegistered
+          }
+          className="w-full text-center text-xs text-muted-foreground/85 hover:text-foreground transition-colors py-1.5 rounded hover:bg-muted/30 disabled:opacity-50 disabled:pointer-events-none flex items-center justify-center gap-1.5"
+        >
+          {isSSOLoading ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              {t("auth.social.completeInBrowser")}
+            </>
+          ) : (
+            t("auth.sso.continueWithSSO")
+          )}
+        </button>
+      )}
 
       {error && (
         <div className="px-3 py-2 rounded-md bg-destructive/5 border border-destructive/20 flex items-center gap-2">
@@ -666,7 +675,7 @@ export default function AuthenticationStep({
       <p className="text-xs text-muted-foreground/80 leading-tight text-center">
         {t("auth.legal.prefix")}{" "}
         <a
-          href="https://openwhispr.com/terms"
+          href="https://ensovoice.com/terms"
           target="_blank"
           rel="noopener noreferrer"
           className="text-link underline decoration-link/30 hover:decoration-link/60 transition-colors"
@@ -675,7 +684,7 @@ export default function AuthenticationStep({
         </a>{" "}
         {t("auth.legal.and")}{" "}
         <a
-          href="https://openwhispr.com/privacy"
+          href="https://ensovoice.com/privacy"
           target="_blank"
           rel="noopener noreferrer"
           className="text-link underline decoration-link/30 hover:decoration-link/60 transition-colors"

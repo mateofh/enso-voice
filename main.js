@@ -43,11 +43,11 @@ try {
 
 const VALID_CHANNELS = new Set(["development", "staging", "production"]);
 const DEFAULT_OAUTH_PROTOCOL_BY_CHANNEL = {
-  development: "openwhispr-dev",
-  staging: "openwhispr-staging",
-  production: "openwhispr",
+  development: "ensovoice-dev",
+  staging: "ensovoice-staging",
+  production: "ensovoice",
 };
-const BASE_WINDOWS_APP_ID = "com.gizmolabs.openwhispr";
+const BASE_WINDOWS_APP_ID = "com.enso.voice";
 const DEFAULT_AUTH_BRIDGE_PORT = 5199;
 
 function isElectronBinaryExec() {
@@ -86,7 +86,7 @@ function configureChannelUserDataPath() {
     return;
   }
 
-  const isolatedPath = path.join(app.getPath("appData"), `OpenWhispr-${APP_CHANNEL}`);
+  const isolatedPath = path.join(app.getPath("appData"), `EnsoVoice-${APP_CHANNEL}`);
   app.setPath("userData", isolatedPath);
 }
 
@@ -237,8 +237,8 @@ if (!gotSingleInstanceLock) {
 const isLiveWindow = (window) => window && !window.isDestroyed();
 
 // Ensure macOS menus use the proper casing for the app name
-if (process.platform === "darwin" && app.getName() !== "OpenWhispr") {
-  app.setName("OpenWhispr");
+if (process.platform === "darwin" && app.getName() !== "Enso Voice") {
+  app.setName("Enso Voice");
 }
 
 // Add global error handling for uncaught exceptions
@@ -668,14 +668,14 @@ function resolveAuthUrl() {
     process.env.AUTH_URL ||
     process.env.VITE_AUTH_URL ||
     runtimeEnv.VITE_AUTH_URL ||
-    "https://auth.openwhispr.com"
+    "https://auth.ensovoice.com"
   );
 }
 
 function getOauthCookieName() {
   return process.env.NODE_ENV === "production"
-    ? "__Secure-openwhispr.session_token"
-    : "openwhispr.session_token";
+    ? "__Secure-ensovoice.session_token"
+    : "ensovoice.session_token";
 }
 
 // Older website builds send the signed cookie value as `?token=`; trade it
@@ -858,7 +858,7 @@ function startAuthBridgeServer() {
 
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(
-      "<html><body><h3>OpenWhispr sign-in complete.</h3><p>You can close this tab.</p></body></html>"
+      "<html><body><h3>Enso Voice sign-in complete.</h3><p>You can close this tab.</p></body></html>"
     );
   });
 

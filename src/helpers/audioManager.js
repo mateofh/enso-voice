@@ -1301,7 +1301,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       } else if (isOpenWhisprCloudMode) {
         if (!isSignedIn) {
           const err = new Error(
-            "OpenWhispr Cloud requires sign-in. Please sign in again or switch to BYOK mode."
+            "Enso Cloud requires sign-in. Please sign in again or switch to BYOK mode."
           );
           err.code = "AUTH_REQUIRED";
           err.messageKey = "hooks.audioRecording.errorDescriptions.sessionExpired";
@@ -3215,7 +3215,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     // Self-hosted transcription is batch HTTP to the user's server, never cloud realtime WS.
     if (isSelfHostedTranscription(s)) return false;
 
-    // Corti (BYOK) streams over its own WSS — independent of OpenWhispr Cloud.
+    // Corti (BYOK) streams over its own WSS — independent of Enso Cloud.
     if (s.cloudTranscriptionProvider === "corti" && s.cloudTranscriptionMode === "byok") {
       return !!(s.cortiClientId && s.cortiClientSecret);
     }
@@ -3662,7 +3662,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       } else if (error.code === "AUTH_EXPIRED" || error.code === "AUTH_REQUIRED") {
         errorTitle = "Sign-in Required";
         errorDescription =
-          "Your OpenWhispr Cloud session is unavailable. Please sign in again from Settings.";
+          "Your Enso Cloud session is unavailable. Please sign in again from Settings.";
       } else if (error.code === "NETWORK_ERROR") {
         errorTitle = "streaming.errors.cloudUnreachable.title";
         errorDescription = error.messageKey || "streaming.errors.cloudUnreachable.generic";
@@ -3951,11 +3951,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     if (!finalText && durationSeconds > 2 && fallbackBlob?.size > 0) {
       const target = resolveStreamingFallbackTarget(getSettings());
       if (target === "skip") {
-        logger.warn(
-          "Skipping batch fallback: OpenWhispr Cloud session signed out",
-          {},
-          "streaming"
-        );
+        logger.warn("Skipping batch fallback: Enso Cloud session signed out", {}, "streaming");
       } else {
         logger.info(
           "Streaming produced no text, falling back to batch transcription",
@@ -4019,6 +4015,8 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
                   audioSizeBytes: streamingAudioBytesSent || undefined,
                   audioFormat: "linear16",
                   clientTotalMs,
+                  clientUsageId: crypto.randomUUID(),
+                  purpose: "dictation",
                 }
               );
               if (!res.success) {

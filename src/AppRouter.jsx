@@ -9,6 +9,7 @@ import WindowControls from "./components/WindowControls.tsx";
 import { Card, CardContent } from "./components/ui/card.tsx";
 import { useAuth } from "./hooks/useAuth";
 import { useTheme } from "./hooks/useTheme";
+import { ENSO_BETA_FEATURES } from "./config/product";
 
 const ControlPanel = React.lazy(() => import("./components/ControlPanel.tsx"));
 const OnboardingFlow = React.lazy(() => import("./components/OnboardingFlow.tsx"));
@@ -41,7 +42,8 @@ function MainApp() {
   const [isLoading, setIsLoading] = useState(true);
   const [postOnboardingSettingsSection, setPostOnboardingSettingsSection] = useState(undefined);
 
-  const isAgentPanel = window.location.search.includes("agent=true");
+  const isAgentPanel =
+    ENSO_BETA_FEATURES.chatAgent && window.location.search.includes("agent=true");
   const isControlPanel =
     !isAgentPanel &&
     (window.location.pathname.includes("control") || window.location.search.includes("panel=true"));
@@ -192,7 +194,7 @@ function LoadingFallback({ message }) {
         <svg
           viewBox="0 0 1024 1024"
           className="w-12 h-12 drop-shadow-[0_2px_8px_rgba(37,99,235,0.18)] dark:drop-shadow-[0_2px_12px_rgba(100,149,237,0.25)]"
-          aria-label="OpenWhispr"
+          aria-label="Enso Voice"
         >
           <rect width="1024" height="1024" rx="241" fill="#2056DF" />
           <circle cx="512" cy="512" r="314" fill="#2056DF" stroke="white" strokeWidth="74" />

@@ -39,7 +39,7 @@ const WINDOW_SIZES = {
 const MAIN_WINDOW_CONFIG = {
   width: WINDOW_SIZES.BASE.width,
   height: WINDOW_SIZES.BASE.height,
-  title: "Voice Recorder",
+  title: "Enso Voice",
   webPreferences: {
     preload: path.join(__dirname, "..", "..", "preload.js"),
     nodeIntegration: false,
@@ -69,18 +69,12 @@ const CONTROL_PANEL_CONFIG = {
     preload: path.join(__dirname, "..", "..", "preload.js"),
     nodeIntegration: false,
     contextIsolation: true,
-    // sandbox: false is required because the preload script bridges IPC
-    // between the renderer and main process.
-    sandbox: false,
-    // webSecurity: false disables same-origin policy. Required because in
-    // production the renderer loads from a file:// origin but makes
-    // cross-origin fetch calls to Better Auth, Gemini, OpenAI, and Groq APIs
-    // directly from the browser. These would be blocked by CORS otherwise.
-    webSecurity: false,
+    sandbox: true,
+    webSecurity: true,
     spellcheck: false,
     backgroundThrottling: false,
   },
-  title: "Control Panel",
+  title: "Enso Voice",
   resizable: true,
   show: false,
   frame: false,
@@ -251,8 +245,8 @@ const AGENT_OVERLAY_CONFIG = {
     preload: path.join(__dirname, "..", "..", "preload.js"),
     nodeIntegration: false,
     contextIsolation: true,
-    sandbox: false,
-    webSecurity: false,
+    sandbox: true,
+    webSecurity: true,
     spellcheck: false,
     backgroundThrottling: false,
   },

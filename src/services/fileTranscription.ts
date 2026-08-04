@@ -40,11 +40,15 @@ export async function transcribeFile(
   filePath: string,
   cfg: FileTranscriptionConfig,
   diarize: boolean,
-  opts: { requestId?: string } = {}
+  opts: { requestId?: string; purpose?: "dictation" | "meeting" } = {}
 ): Promise<FileTranscriptionResult> {
   if (cfg.isOpenWhisprCloud) {
     return withSessionRefresh(async () => {
-      const r = await window.electronAPI.transcribeAudioFileCloud!(filePath, opts);
+      const r = await window.electronAPI.transcribeAudioFileCloud!(filePath, {
+        ...opts,
+        purpose: diarize ? "meeting" : (opts.purpose ?? "dictation"),
+        diarize: diarize || undefined,
+      });
       if (!r.success && r.code) {
         throw Object.assign(new Error(r.error || "Cloud transcription failed"), {
           code: r.code,
@@ -79,19 +83,21 @@ export async function transcribeFile(
   });
 }
 
-// OpenAI/Mistral BYOK handle diarization inside the transcription call itself.
+// Enso managed transcription and OpenAI/Mistral BYOK handle diarization inside
+// the transcription call itself.
 // Self-hosted mode routes to the user's own server, which doesn't — those users
 // get local diarization like everyone else.
-export function shouldUseByokDiarize(
+export function shouldUseNativeDiarize(
   cfg: FileTranscriptionConfig,
   diarizationEnabled: boolean
 ): boolean {
   return (
     diarizationEnabled &&
     !cfg.useLocalWhisper &&
-    !cfg.isOpenWhisprCloud &&
     cfg.transcriptionMode !== "self-hosted" &&
-    (cfg.cloudTranscriptionProvider === "openai" || cfg.cloudTranscriptionProvider === "mistral")
+    (cfg.isOpenWhisprCloud ||
+      cfg.cloudTranscriptionProvider === "openai" ||
+      cfg.cloudTranscriptionProvider === "mistral")
   );
 }
 
@@ -103,11 +109,11 @@ export async function transcribeFileWithSpeakers(
   cfg: FileTranscriptionConfig,
   diarization: DiarizationSettings,
   durationSeconds?: number | null,
-  opts: { requestId?: string } = {}
+  opts: { requestId?: string; purpose?: "dictation" | "meeting" } = {}
 ): Promise<FileTranscriptionResult> {
-  const byokDiarize = shouldUseByokDiarize(cfg, diarization.enabled);
+  const nativeDiarize = shouldUseNativeDiarize(cfg, diarization.enabled);
   const diarizePromise =
-    diarization.enabled && diarization.localModelsReady && !byokDiarize
+    diarization.enabled && diarization.localModelsReady && !nativeDiarize
       ? (window.electronAPI
           .diarizeAudioFile?.(filePath, {
             numSpeakers: diarization.numSpeakers ?? undefined,
@@ -116,7 +122,7 @@ export async function transcribeFileWithSpeakers(
       : Promise.resolve(null);
 
   const [result, diar] = await Promise.all([
-    transcribeFile(filePath, cfg, byokDiarize, opts),
+    transcribeFile(filePath, cfg, nativeDiarize, opts),
     diarizePromise,
   ]);
 

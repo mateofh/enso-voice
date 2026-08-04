@@ -1,11 +1,9 @@
 import React, { useState } from "react";
 import {
   Home,
-  MessageSquare,
   NotebookPen,
   BookOpen,
   Upload,
-  Blocks,
   Gift,
   Settings,
   HelpCircle,
@@ -18,6 +16,7 @@ import { useTranslation } from "react-i18next";
 import { cn } from "./lib/utils";
 import SupportDropdown from "./ui/SupportDropdown";
 import { getCachedPlatform } from "../utils/platform";
+import { ENSO_BETA_FEATURES } from "../config/product";
 
 const platform = getCachedPlatform();
 
@@ -28,8 +27,7 @@ const rowLabelClass =
 const rowButtonClass =
   "group flex items-center gap-2.5 w-full h-8 px-2.5 rounded-md text-left outline-none hover:bg-foreground/4 dark:hover:bg-white/4 focus-visible:ring-1 focus-visible:ring-primary/30 transition-colors duration-150";
 
-export type ControlPanelView =
-  "home" | "chat" | "personal-notes" | "dictionary" | "upload" | "integrations";
+export type ControlPanelView = "home" | "personal-notes" | "dictionary" | "upload";
 
 interface ControlPanelSidebarProps {
   activeView: ControlPanelView;
@@ -71,8 +69,10 @@ export default function ControlPanelSidebar({
     () => localStorage.getItem("upgradeProDismissed") === "true"
   );
 
-  const showLimitBanner = authLoaded && isSignedIn && !isProUser && isOverLimit;
+  const showLimitBanner =
+    ENSO_BETA_FEATURES.publicBilling && authLoaded && isSignedIn && !isProUser && isOverLimit;
   const showUpgradeBanner =
+    ENSO_BETA_FEATURES.publicBilling &&
     !showLimitBanner &&
     authLoaded &&
     (!isSignedIn || usageLoaded !== false) &&
@@ -85,11 +85,9 @@ export default function ControlPanelSidebar({
     icon: React.ComponentType<{ size?: number; className?: string }>;
   }[] = [
     { id: "home", label: t("sidebar.home"), icon: Home },
-    { id: "chat", label: t("sidebar.chat"), icon: MessageSquare },
     { id: "personal-notes", label: t("sidebar.notes"), icon: NotebookPen },
     { id: "upload", label: t("sidebar.upload"), icon: Upload },
     { id: "dictionary", label: t("sidebar.dictionary"), icon: BookOpen },
-    { id: "integrations", label: t("sidebar.integrations"), icon: Blocks },
   ];
 
   return (
@@ -225,7 +223,7 @@ export default function ControlPanelSidebar({
           </div>
         )}
 
-        {isSignedIn && onOpenReferrals && (
+        {ENSO_BETA_FEATURES.referrals && isSignedIn && onOpenReferrals && (
           <button
             onClick={onOpenReferrals}
             aria-label={t("sidebar.referral")}

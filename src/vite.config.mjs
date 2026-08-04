@@ -36,6 +36,7 @@ export default defineConfig(({ mode }) => {
         writeBundle() {
           const runtimeEnv = {
             VITE_OPENWHISPR_API_URL: env.VITE_OPENWHISPR_API_URL || "",
+            VITE_ENSO_API_URL: env.VITE_ENSO_API_URL || env.VITE_OPENWHISPR_API_URL || "",
             VITE_AUTH_URL: env.VITE_AUTH_URL || "",
           };
           fs.writeFileSync(

@@ -44,7 +44,10 @@ import {
 } from "../../stores/settingsStore";
 import { useBatchQueue } from "../../stores/batchQueueStore";
 import type { TranscribeOptions } from "../../stores/batchQueueStore";
-import { transcribeFileWithSpeakers, shouldUseByokDiarize } from "../../services/fileTranscription";
+import {
+  transcribeFileWithSpeakers,
+  shouldUseNativeDiarize,
+} from "../../services/fileTranscription";
 import type {
   FileTranscriptionConfig,
   FileTranscriptionResult,
@@ -204,7 +207,7 @@ export default function UploadAudioView({ onNoteCreated, onOpenSettings }: Uploa
       // Heal a persisted-on toggle whose models were removed since; roll it back
       // if the download fails so it can't sit ON while doing nothing.
       if (!ready && localStorage.getItem("uploadDiarizationEnabled") === "true") {
-        if (shouldUseByokDiarize(buildTranscriptionConfig(), true)) return;
+        if (shouldUseNativeDiarize(buildTranscriptionConfig(), true)) return;
         ensureDiarizationModels().then((ok) => {
           if (!ok) setDiarizationEnabled(false);
         });
@@ -1192,7 +1195,7 @@ export default function UploadAudioView({ onNoteCreated, onOpenSettings }: Uploa
                   if (
                     next &&
                     !diarizationModelsReady &&
-                    !shouldUseByokDiarize(buildTranscriptionConfig(), true)
+                    !shouldUseNativeDiarize(buildTranscriptionConfig(), true)
                   ) {
                     const ready = await ensureDiarizationModels();
                     if (!ready) setDiarizationEnabled(false);

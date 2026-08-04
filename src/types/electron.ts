@@ -1587,6 +1587,8 @@ declare global {
           audioSizeBytes?: number;
           audioFormat?: string;
           clientTotalMs?: number;
+          clientUsageId?: string;
+          purpose?: "dictation" | "meeting";
         }
       ) => Promise<{
         success: boolean;
@@ -1617,7 +1619,11 @@ declare global {
         entitlementSources?: {
           personal: boolean;
           workspaceIds: string[];
+          community?: boolean;
+          internal?: boolean;
         };
+        entitlement?: import("./entitlements").Entitlement;
+        credits?: import("./entitlements").CreditBalance | null;
         resetAt?: string;
         error?: string;
         code?: string;
@@ -1680,11 +1686,16 @@ declare global {
       // Cloud audio file transcription
       transcribeAudioFileCloud?: (
         filePath: string,
-        options?: { requestId?: string }
+        options?: {
+          requestId?: string;
+          purpose?: "dictation" | "meeting";
+          diarize?: boolean;
+        }
       ) => Promise<{
         success: boolean;
         text?: string;
         warning?: string;
+        diarized?: boolean;
         error?: string;
         code?: string;
       }>;

@@ -2184,7 +2184,7 @@ class IPCHandlers {
         const resolved = path.resolve(filePath);
         const basename = path.basename(resolved);
         if (!basename.startsWith("ow-url-") && !basename.startsWith("ow-diarize-")) {
-          return { success: false, error: "Not an OpenWhispr temp file" };
+          return { success: false, error: "Not an Enso Voice temp file" };
         }
         const real = fs.realpathSync(resolved);
         let tempDir = getSafeTempDir();
@@ -2193,7 +2193,7 @@ class IPCHandlers {
         } catch {}
         const rel = path.relative(tempDir, real);
         if (rel.startsWith("..") || path.isAbsolute(rel)) {
-          return { success: false, error: "Not an OpenWhispr temp file" };
+          return { success: false, error: "Not an Enso Voice temp file" };
         }
         fs.unlinkSync(real);
         return { success: true };
@@ -4499,6 +4499,9 @@ class IPCHandlers {
     })();
 
     const getApiUrl = () =>
+      process.env.ENSO_API_URL ||
+      process.env.VITE_ENSO_API_URL ||
+      runtimeEnv.VITE_ENSO_API_URL ||
       process.env.OPENWHISPR_API_URL ||
       process.env.VITE_OPENWHISPR_API_URL ||
       runtimeEnv.VITE_OPENWHISPR_API_URL ||
@@ -4508,7 +4511,7 @@ class IPCHandlers {
       process.env.AUTH_URL ||
       process.env.VITE_AUTH_URL ||
       runtimeEnv.VITE_AUTH_URL ||
-      "https://auth.openwhispr.com";
+      "https://auth.ensovoice.com";
 
     const getSessionCookiesFromWindow = async (win) => {
       const scopedUrls = [getAuthUrl(), getApiUrl()].filter(Boolean);
@@ -4590,7 +4593,7 @@ class IPCHandlers {
     ipcMain.handle("cloud-transcribe", async (event, audioBuffer, opts = {}) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -5441,7 +5444,7 @@ class IPCHandlers {
       const postServerToken = async (path, body = {}) => {
         const apiUrl = getApiUrl();
         if (!apiUrl) {
-          const err = new Error("OpenWhispr API URL not configured");
+          const err = new Error("Enso Voice API URL not configured");
           err.code = "NO_API";
           throw err;
         }
@@ -7172,7 +7175,7 @@ class IPCHandlers {
     ipcMain.handle("cloud-reason", async (event, text, opts = {}) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7259,7 +7262,7 @@ class IPCHandlers {
     ipcMain.on("cloud-agent-stream-start", async (event, messages, opts = {}) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7351,7 +7354,7 @@ class IPCHandlers {
     ipcMain.handle("agent-web-search", async (event, query, numResults = 5) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7394,7 +7397,7 @@ class IPCHandlers {
       async (event, text, audioDurationSeconds, opts = {}) => {
         try {
           const apiUrl = getApiUrl();
-          if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+          if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
           const authHeader = await getAuthHeader(event);
           if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7419,6 +7422,8 @@ class IPCHandlers {
               audioSizeBytes: opts.audioSizeBytes,
               audioFormat: opts.audioFormat,
               clientTotalMs: opts.clientTotalMs,
+              clientUsageId: opts.clientUsageId,
+              purpose: opts.purpose || "dictation",
               sendLogs: opts.sendLogs,
             }),
           });
@@ -7445,7 +7450,7 @@ class IPCHandlers {
     ipcMain.handle("cloud-usage", async (event) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7475,7 +7480,7 @@ class IPCHandlers {
     const fetchStripeUrl = async (event, endpoint, errorPrefix, body) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7519,7 +7524,7 @@ class IPCHandlers {
     ipcMain.handle("cloud-switch-plan", async (event, opts) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7551,7 +7556,7 @@ class IPCHandlers {
     ipcMain.handle("cloud-preview-switch", async (event, opts) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7585,7 +7590,7 @@ class IPCHandlers {
     ipcMain.handle("get-stt-config", async (event) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7615,7 +7620,7 @@ class IPCHandlers {
     ipcMain.handle("get-note-recording-config", async (event) => {
       try {
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
@@ -7651,17 +7656,19 @@ class IPCHandlers {
         if (!realCloud) return { success: false, error: "File path not allowed" };
 
         const apiUrl = getApiUrl();
-        if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+        if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
         const authHeader = await getAuthHeader(event);
         if (!Object.keys(authHeader).length) throw new Error("Not authenticated");
 
         const multipartFields = {
-          source: "file_upload",
+          source: opts.purpose === "meeting" ? "meeting" : "file_upload",
+          diarize: opts.diarize,
           clientType: "desktop",
           appVersion: app.getVersion(),
           clientVersion: app.getVersion(),
           sessionId: this.sessionId,
+          clientTranscriptionId: requestId,
         };
 
         const fileSize = fs.statSync(realCloud).size;
@@ -7703,7 +7710,7 @@ class IPCHandlers {
         });
         const result = interpretTranscribeResponse(data);
 
-        return { success: true, text: result.text };
+        return { success: true, text: result.text, diarized: result.diarized === true };
       } catch (error) {
         if (controller.signal.aborted) {
           debugLogger.debug("Cloud audio file transcription cancelled", { requestId });
@@ -7948,7 +7955,7 @@ class IPCHandlers {
       try {
         const apiUrl = getApiUrl();
         if (!apiUrl) {
-          throw new Error("OpenWhispr API URL not configured");
+          throw new Error("Enso Voice API URL not configured");
         }
 
         const authHeader = await getAuthHeader(event);
@@ -7984,7 +7991,7 @@ class IPCHandlers {
       try {
         const apiUrl = getApiUrl();
         if (!apiUrl) {
-          throw new Error("OpenWhispr API URL not configured");
+          throw new Error("Enso Voice API URL not configured");
         }
 
         const authHeader = await getAuthHeader(event);
@@ -8022,7 +8029,7 @@ class IPCHandlers {
       try {
         const apiUrl = getApiUrl();
         if (!apiUrl) {
-          throw new Error("OpenWhispr API URL not configured");
+          throw new Error("Enso Voice API URL not configured");
         }
 
         const authHeader = await getAuthHeader(event);
@@ -8212,7 +8219,7 @@ class IPCHandlers {
     const fetchStreamingToken = async (event) => {
       const apiUrl = getApiUrl();
       if (!apiUrl) {
-        throw new Error("OpenWhispr API URL not configured");
+        throw new Error("Enso Voice API URL not configured");
       }
 
       const authHeader = await getAuthHeader(event);
@@ -8413,7 +8420,7 @@ class IPCHandlers {
 
     const fetchDeepgramStreamingTokenFromWindow = async (windowId) => {
       const apiUrl = getApiUrl();
-      if (!apiUrl) throw new Error("OpenWhispr API URL not configured");
+      if (!apiUrl) throw new Error("Enso Voice API URL not configured");
 
       const win = BrowserWindow.fromId(windowId);
       if (!win || win.isDestroyed()) throw new Error("Window not available for token refresh");
@@ -8443,7 +8450,7 @@ class IPCHandlers {
     const fetchDeepgramStreamingToken = async (event) => {
       const apiUrl = getApiUrl();
       if (!apiUrl) {
-        throw new Error("OpenWhispr API URL not configured");
+        throw new Error("Enso Voice API URL not configured");
       }
 
       const authHeader = await getAuthHeader(event);

@@ -40,7 +40,7 @@ import type {
   ShareVisibility,
 } from "../../types/electron";
 
-const SHARE_VIEWER_BASE_URL = "https://notes.openwhispr.com";
+const SHARE_VIEWER_BASE_URL = "https://ensovoice.com/notes";
 
 interface ShareNoteDialogProps {
   open: boolean;
@@ -766,7 +766,8 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
                 space &&
                 !(access?.grants ?? []).some(
                   (grant) =>
-                    grant.principal.type === "team" && space.teams.some((team) => team.id === grant.principal.id)
+                    grant.principal.type === "team" &&
+                    space.teams.some((team) => team.id === grant.principal.id)
                 ) && (
                   <MemberRow
                     leading={<AudienceIcon />}

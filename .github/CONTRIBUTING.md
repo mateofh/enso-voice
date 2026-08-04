@@ -1,18 +1,16 @@
-# Contributing to OpenWhispr
+# Contributing to Enso Voice
 
-Thanks for your interest in contributing. OpenWhispr is an open-source,
-privacy-first voice-to-text app, and improvements from the community —
-bug reports, fixes, docs, features — are very welcome.
+Enso Voice is the community-focused distribution maintained in this fork. Bug
+reports, fixes and focused product improvements are welcome.
 
-The canonical contributing guide lives at
-**[docs.openwhispr.com/contributing](https://docs.openwhispr.com/contributing)**.
-This file is a short pointer with the repo-local details you may need
-along the way.
+For architecture and upstream development conventions, consult the
+[OpenWhispr contributing guide](https://docs.openwhispr.com/contributing).
 
 ## Filing issues
 
-- Bugs and feature requests:
-  [github.com/OpenWhispr/openwhispr/issues](https://github.com/OpenWhispr/openwhispr/issues)
+- Enso-specific bugs and feature requests belong in this repository.
+- Reproducible upstream defects should also be reported to
+  [OpenWhispr](https://github.com/OpenWhispr/openwhispr/issues).
 - Please use the existing issue templates (`bug_report`, `feature_request`)
   so we have the info needed to reproduce.
 - For transcription or audio problems, attaching debug logs is a huge
@@ -23,21 +21,16 @@ along the way.
 ## Reporting security issues
 
 **Please do not open public issues for security vulnerabilities.**
-Follow the process in [`SECURITY.md`](../SECURITY.md): use
-[GitHub's private vulnerability reporting](https://github.com/OpenWhispr/openwhispr/security/advisories/new)
-or email `security@openwhispr.com`.
+Follow the private reporting process in [`SECURITY.md`](../SECURITY.md).
 
 ## Contributing code
 
-See the [contributing guide](https://docs.openwhispr.com/contributing)
-for the full workflow, coding conventions, and review expectations.
 The short version:
 
 1. Fork the repo and create a feature branch off `main`.
 2. Make your change, keeping the diff focused.
 3. Run `npm run lint` and `npm run format` before opening a PR.
-4. Open a pull request against `OpenWhispr/openwhispr` `main` and fill
-   in the description so reviewers can see the "why".
+4. Open a pull request against `mateofh/enso-voice` and explain the user impact.
 
 ### Local setup
 
@@ -56,5 +49,4 @@ in [`README.md`](../README.md) and
 
 ## Thanks
 
-Thanks for taking the time to contribute — every issue, fix, and
-improvement helps make OpenWhispr better.
+Thanks for helping make Enso Voice better for the community.

@@ -14,6 +14,7 @@ import {
 import SidebarModal, { type SidebarItem } from "./ui/SidebarModal";
 import SettingsPage, { SettingsSectionType } from "./SettingsPage";
 import { useAuth } from "../hooks/useAuth";
+import { ENSO_BETA_FEATURES } from "../config/product";
 
 export type { SettingsSectionType };
 
@@ -64,20 +65,28 @@ export default function SettingsModal({ open, onOpenChange, initialSection }: Se
         description: t("settingsModal.sections.account.description"),
         group: t("settingsModal.groups.account"),
       },
-      {
-        id: "plansBilling",
-        label: t("settingsModal.sections.plansBilling.label"),
-        icon: CreditCard,
-        description: t("settingsModal.sections.plansBilling.description"),
-        group: t("settingsModal.groups.account"),
-      },
-      {
-        id: "workspace" as const,
-        label: t("settingsModal.sections.workspace.label"),
-        icon: Users,
-        description: t("settingsModal.sections.workspace.description"),
-        group: t("settingsModal.groups.account"),
-      },
+      ...(ENSO_BETA_FEATURES.publicBilling
+        ? [
+            {
+              id: "plansBilling" as const,
+              label: t("settingsModal.sections.plansBilling.label"),
+              icon: CreditCard,
+              description: t("settingsModal.sections.plansBilling.description"),
+              group: t("settingsModal.groups.account"),
+            },
+          ]
+        : []),
+      ...(ENSO_BETA_FEATURES.teams
+        ? [
+            {
+              id: "workspace" as const,
+              label: t("settingsModal.sections.workspace.label"),
+              icon: Users,
+              description: t("settingsModal.sections.workspace.description"),
+              group: t("settingsModal.groups.account"),
+            },
+          ]
+        : []),
       {
         id: "general",
         label: t("settingsModal.sections.general.label"),
