@@ -5,7 +5,7 @@
  * globalShortcut, so each one is watched by a native low-level keyboard hook. One
  * hook process is spawned per watched key; key-down/key-up events are emitted
  * tagged with the key so the caller can route them to the right hotkey slot
- * (dictation, voice agent, agent, meeting) and drive push-to-talk.
+ * (dictation, voice assistant, translation, meeting) and drive push-to-talk.
  */
 
 const { spawn } = require("child_process");
@@ -136,13 +136,11 @@ class WindowsKeyManager extends EventEmitter {
     }
 
     if (line === "KEY_DOWN") {
-      debugLogger.debug("[WindowsKeyManager] KEY_DOWN detected", { key });
       this.emit("key-down", key);
       return;
     }
 
     if (line === "KEY_UP") {
-      debugLogger.debug("[WindowsKeyManager] KEY_UP detected", { key });
       this.emit("key-up", key);
       return;
     }
@@ -162,6 +160,13 @@ class WindowsKeyManager extends EventEmitter {
    */
   isAvailable() {
     return this.resolveListenerBinary() !== null;
+  }
+
+  // Same shape as LinuxKeyManager.checkAvailability, for HotkeyManager's probe.
+  checkAvailability() {
+    return this.isAvailable()
+      ? { available: true }
+      : { available: false, reason: "binary_missing" };
   }
 
   /**

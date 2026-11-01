@@ -1,7 +1,7 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./button";
-import { HelpCircle, Mail, Bug, BookOpen } from "lucide-react";
+import { HelpCircle, Mail, Bug, BookOpen } from "../icons";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -54,29 +54,29 @@ export default function SupportDropdown({ className, trigger }: SupportDropdownP
         )}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => openExternal("https://ensovoice.com/docs")}>
-          <BookOpen className="mr-2 h-4 w-4" />
+        <DropdownMenuItem onClick={() => openExternal("https://beenso.com/es")}>
+          <BookOpen className="me-2 h-4 w-4" />
           {t("support.documentation")}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => openExternal("https://discord.gg/yZWC9WTtX7")}>
-          <DiscordIcon className="mr-2 h-4 w-4" />
+          <DiscordIcon className="me-2 h-4 w-4" />
           {t("support.joinDiscord")}
         </DropdownMenuItem>
         <DropdownMenuItem
           onClick={async () => {
-            const result = await window.electronAPI?.openExternal("mailto:support@ensovoice.com");
+            const result = await window.electronAPI?.openExternal("mailto:hola@beenso.com");
             if (!result?.success) {
-              openExternal("https://mail.google.com/mail/?view=cm&to=support@ensovoice.com");
+              openExternal("https://mail.google.com/mail/?view=cm&to=hola@beenso.com");
             }
           }}
         >
-          <Mail className="mr-2 h-4 w-4" />
+          <Mail className="me-2 h-4 w-4" />
           {t("support.contactSupport")}
         </DropdownMenuItem>
         <DropdownMenuItem
           onClick={() => openExternal("https://github.com/mateofh/enso-voice/issues")}
         >
-          <Bug className="mr-2 h-4 w-4" />
+          <Bug className="me-2 h-4 w-4" />
           {t("support.submitBug")}
         </DropdownMenuItem>
       </DropdownMenuContent>

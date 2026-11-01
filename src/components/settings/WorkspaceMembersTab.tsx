@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useTranslation } from "react-i18next";
-import { Trash2, MoreVertical, Mail, X, Loader2 } from "lucide-react";
+import { Trash2, MoreVertical, Mail, X, Loader2 } from "../icons";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { WorkspacesService } from "../../services/WorkspacesService";
 import { InvitationsService } from "../../services/InvitationsService";
@@ -9,7 +9,12 @@ import { useDialogs } from "../../hooks/useDialogs";
 import { Button } from "../ui/button";
 import { ConfirmDialog } from "../ui/dialog";
 import { useToast } from "../ui/useToast";
-import type { Workspace, WorkspaceInvitation, WorkspaceMember } from "../../types/electron";
+import type {
+  Workspace,
+  WorkspaceInvitation,
+  WorkspaceJoinRequest,
+  WorkspaceMember,
+} from "../../types/electron";
 import InviteTeammateDialog from "../InviteTeammateDialog";
 import MemberAvatar from "../MemberAvatar";
 import RoleBadge from "../RoleBadge";
@@ -20,18 +25,17 @@ import {
   DropdownMenuItem,
 } from "../ui/dropdown-menu";
 import { cn } from "../lib/utils";
-import { canManageWorkspace } from "../../lib/spacePermissions";
+import { workspaceCan } from "../../lib/capabilities";
 
 interface Props {
   workspace: Workspace;
-  onNavigateToBilling: () => void;
 }
 
 function invitationDaysLeft(inv: WorkspaceInvitation): number {
   return Math.ceil((new Date(inv.expires_at).getTime() - Date.now()) / 86_400_000);
 }
 
-export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: Props) {
+export default function WorkspaceMembersTab({ workspace }: Props) {
   const { t } = useTranslation();
   const { toast } = useToast();
   const { confirmDialog, showConfirmDialog, hideConfirmDialog } = useDialogs();
@@ -43,13 +47,15 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
     }))
   );
   const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
+  const [joinRequests, setJoinRequests] = useState<WorkspaceJoinRequest[]>([]);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [resendingId, setResendingId] = useState<string | null>(null);
   const [membersLoading, setMembersLoading] = useState(false);
   const [membersError, setMembersError] = useState(false);
   const [invitationsError, setInvitationsError] = useState(false);
-  const canManage = canManageWorkspace(workspace.role);
-
+  const canManage = workspaceCan(workspace, "manage_members");
+  const canTransferOwnership = workspaceCan(workspace, "transfer_ownership");
   async function loadMembers() {
     setMembersLoading(true);
     setMembersError(false);
@@ -59,6 +65,40 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
       setMembersError(true);
     } finally {
       setMembersLoading(false);
+    }
+  }
+
+  async function refreshJoinRequests() {
+    try {
+      setJoinRequests(await WorkspacesService.listJoinRequests(workspace.id));
+    } catch {
+      // Requests are additive context; a failure here must not break the tab.
+      setJoinRequests([]);
+    }
+  }
+
+  async function decideJoinRequest(request: WorkspaceJoinRequest, decision: "approve" | "deny") {
+    setDecidingId(request.id);
+    try {
+      await WorkspacesService.decideJoinRequest(workspace.id, request.id, decision);
+      setJoinRequests((current) => current.filter((r) => r.id !== request.id));
+      if (decision === "approve") await loadMembers();
+      toast({
+        title:
+          decision === "approve"
+            ? t("settingsPage.workspace.joinRequests.approved", {
+                name: request.name ?? request.email,
+              })
+            : t("settingsPage.workspace.joinRequests.denied"),
+      });
+    } catch (error) {
+      toast({
+        title: t("settingsPage.workspace.joinRequests.errorTitle"),
+        description: error instanceof Error ? error.message : t("common.unknownError"),
+        variant: "destructive",
+      });
+    } finally {
+      setDecidingId(null);
     }
   }
 
@@ -75,7 +115,10 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
 
   useEffect(() => {
     void loadMembers();
-    if (canManage) void refreshInvitations();
+    if (canManage) {
+      void refreshInvitations();
+      void refreshJoinRequests();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace.id]);
 
@@ -203,7 +246,7 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
         </div>
         {canManage && (
           <Button size="sm" onClick={() => setInviteOpen(true)}>
-            <Mail className="mr-1.5 h-3.5 w-3.5" />
+            <Mail className="me-1.5 h-3.5 w-3.5" />
             {t("settingsPage.workspace.members.invite")}
           </Button>
         )}
@@ -212,7 +255,7 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
       {membersLoading && members.length === 0 ? (
         <div className="h-24 rounded-lg bg-foreground/5 dark:bg-white/5 animate-pulse" />
       ) : membersError && members.length === 0 ? (
-        <div className="rounded-lg border border-border/50 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 px-4 py-6 flex items-center justify-between gap-2">
+        <div className="rounded-lg border border-border/70 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 px-4 py-6 flex items-center justify-between gap-2">
           <p className="text-xs text-muted-foreground">
             {t("settingsPage.workspace.members.loadError")}
           </p>
@@ -221,16 +264,18 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
           </Button>
         </div>
       ) : (
-        <div className="rounded-lg border border-border/50 dark:border-border-subtle/70 divide-y divide-border/30 dark:divide-border-subtle/50 bg-card/50 dark:bg-surface-2/50">
+        <div className="rounded-lg border border-border/70 dark:border-border-subtle/70 divide-y divide-border/60 dark:divide-border-subtle/50 bg-card/50 dark:bg-surface-2/50">
           {members.map((member) => (
             <div key={member.user_id} className="flex items-center gap-3 px-4 h-14">
               <MemberAvatar name={member.name} email={member.email} image={member.image} />
               <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-foreground truncate">
+                <p dir="auto" className="text-xs font-medium text-foreground truncate">
                   {member.name || member.email}
                 </p>
                 {member.name && (
-                  <p className="text-xs text-muted-foreground truncate">{member.email}</p>
+                  <p className="text-xs text-muted-foreground truncate">
+                    <bdi dir="ltr">{member.email}</bdi>
+                  </p>
                 )}
               </div>
               <RoleBadge
@@ -256,7 +301,7 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
                         {t("settingsPage.workspace.members.demote")}
                       </DropdownMenuItem>
                     )}
-                    {workspace.role === "owner" && (
+                    {canTransferOwnership && (
                       <DropdownMenuItem onSelect={() => confirmTransferOwnership(member)}>
                         {t("settingsPage.workspace.members.transferOwnership")}
                       </DropdownMenuItem>
@@ -265,7 +310,7 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
                       className="text-destructive"
                       onSelect={() => confirmRemoveMember(member)}
                     >
-                      <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                      <Trash2 className="me-1.5 h-3.5 w-3.5" />
                       {t("settingsPage.workspace.members.remove")}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
@@ -282,7 +327,7 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
       )}
 
       {canManage && invitationsError && (
-        <div className="rounded-lg border border-border/50 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 px-4 py-3 flex items-center justify-between gap-2">
+        <div className="rounded-lg border border-border/70 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 px-4 py-3 flex items-center justify-between gap-2">
           <p className="text-xs text-muted-foreground">
             {t("settingsPage.workspace.invites.loadError")}
           </p>
@@ -292,12 +337,62 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
         </div>
       )}
 
+      {canManage && joinRequests.length > 0 && (
+        <div>
+          <h4 className="text-xs font-semibold text-foreground mb-2">
+            {t("settingsPage.workspace.joinRequests.title")}
+          </h4>
+          <div className="rounded-lg border border-border/70 dark:border-border-subtle/70 divide-y divide-border/60 dark:divide-border-subtle/50 bg-card/50 dark:bg-surface-2/50">
+            {joinRequests.map((request) => (
+              <div key={request.id} className="flex items-center gap-3 px-4 h-12">
+                <MemberAvatar
+                  name={request.name}
+                  email={request.email}
+                  image={request.image}
+                  size="sm"
+                />
+                <div className="flex-1 min-w-0">
+                  <p dir="auto" className="text-xs text-foreground truncate">
+                    {request.name ?? request.email}
+                  </p>
+                  {request.name && (
+                    <p className="text-[11px] text-muted-foreground truncate">
+                      <bdi dir="ltr">{request.email}</bdi>
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void decideJoinRequest(request, "deny")}
+                    disabled={decidingId !== null}
+                  >
+                    {t("settingsPage.workspace.joinRequests.deny")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => void decideJoinRequest(request, "approve")}
+                    disabled={decidingId !== null}
+                  >
+                    {decidingId === request.id && (
+                      <Loader2 className="me-1.5 h-3.5 w-3.5 animate-spin" />
+                    )}
+                    {t("settingsPage.workspace.joinRequests.approve")}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {canManage && invitations.length > 0 && (
         <div>
           <h4 className="text-xs font-semibold text-foreground mb-2">
             {t("settingsPage.workspace.invites.title")}
           </h4>
-          <div className="rounded-lg border border-border/50 dark:border-border-subtle/70 divide-y divide-border/30 dark:divide-border-subtle/50 bg-card/50 dark:bg-surface-2/50">
+          <div className="rounded-lg border border-border/70 dark:border-border-subtle/70 divide-y divide-border/60 dark:divide-border-subtle/50 bg-card/50 dark:bg-surface-2/50">
             {invitations.map((inv) => {
               const daysLeft = invitationDaysLeft(inv);
               const expired = daysLeft <= 0;
@@ -308,7 +403,9 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
                 >
                   <Mail className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs text-foreground truncate">{inv.email}</p>
+                    <p className="text-xs text-foreground truncate">
+                      <bdi dir="ltr">{inv.email}</bdi>
+                    </p>
                     <p
                       className={cn(
                         "text-[11px]",
@@ -330,7 +427,7 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
                     disabled={resendingId === inv.id}
                     className="h-7 px-2"
                   >
-                    {resendingId === inv.id && <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />}
+                    {resendingId === inv.id && <Loader2 className="me-1.5 h-3 w-3 animate-spin" />}
                     {resendingId === inv.id
                       ? t("settingsPage.workspace.invites.resending")
                       : t("settingsPage.workspace.invites.resend")}
@@ -356,7 +453,6 @@ export default function WorkspaceMembersTab({ workspace, onNavigateToBilling }: 
         workspaceId={workspace.id}
         workspaceName={workspace.name}
         onInvited={refreshInvitations}
-        onNavigateToBilling={onNavigateToBilling}
       />
 
       <ConfirmDialog

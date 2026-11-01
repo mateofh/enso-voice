@@ -26,5 +26,5 @@ jobs:
           ELECTRON_OVERRIDE_DIST_PATH: /tmp
       - run: npm run build:renderer
         env:
-          VITE_AUTH_URL: https://auth.ensovoice.com
-          VITE_ENSO_API_URL: https://api.ensovoice.com
+          VITE_AUTH_URL: https://voice.beenso.com
+          VITE_ENSO_API_URL: https://voice.beenso.com

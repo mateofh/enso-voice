@@ -1,6 +1,117 @@
 // Pure decision logic for sync passes, kept out of SyncService so the
 // node --test suite can cover it (the cloudSyncGuards.js precedent, #1290).
 
+export interface SyncConsent {
+  /** Backup of everything the user has NOT explicitly shared. */
+  backup: boolean;
+  /** Shared notes and team-space content. */
+  shared: boolean;
+  /** Content-free Insights counters. */
+  analytics: boolean;
+}
+
+/**
+ * What the account has consented to sync. Backup is a blanket copy of private
+ * content, so it stays behind the plan, the cloud-backup toggle, and org
+ * policy. Sharing a note or joining a team space is per-item consent the user
+ * gave deliberately, so it syncs whenever they are signed in — collaboration
+ * is not a paid feature, and gating it on the *invitee's* plan silently
+ * stranded free teammates in workspaces they had already been added to.
+ *
+ * Insights counters carry no content and are free, so they answer to their own
+ * opt-in rather than the backup toggle or the plan. They still require local
+ * history and are user data leaving the device, so org policy gates them like
+ * backup.
+ */
+export function resolveSyncConsent(state: {
+  authValidated: boolean;
+  signedIn: boolean;
+  backupEnabled: boolean;
+  subscribed: boolean;
+  backupAllowedByPolicy: boolean;
+  dataRetentionEnabled: boolean;
+  insightsSyncEnabled: boolean;
+}): SyncConsent {
+  const shared = state.authValidated && state.signedIn;
+  return {
+    shared,
+    backup: shared && state.backupEnabled && state.subscribed && state.backupAllowedByPolicy,
+    analytics:
+      shared &&
+      state.insightsSyncEnabled &&
+      state.backupAllowedByPolicy &&
+      state.dataRetentionEnabled,
+  };
+}
+
+/**
+ * Whether the Insights view offers to adopt the counters recorded while signed
+ * out. The offer is gated on there being rows to adopt, never on the sync
+ * toggle: account-scope bootstrap can leave rows unattributed while the local
+ * setting is on. Gating the offer on the toggle left exactly those rows
+ * unreachable — excluded from the account summary the view then shows, so
+ * visible totals silently dropped. Offering is not adopting: the prompt still
+ * has to be confirmed (useInsightsSyncOptIn).
+ *
+ * The other three inputs are the preconditions the offer always had. Retention
+ * being off is not a technicality here: it stops new counters being recorded,
+ * so a sync the user turns on would have nothing to carry.
+ */
+export function canOfferAnalyticsClaim(state: {
+  signedIn: boolean;
+  syncAllowedByPolicy: boolean;
+  dataRetentionEnabled: boolean;
+  insightsSyncEnabled: boolean;
+  unclaimedCount: number;
+}): boolean {
+  if (!state.signedIn || !state.syncAllowedByPolicy || !state.dataRetentionEnabled) return false;
+  return !state.insightsSyncEnabled || state.unclaimedCount > 0;
+}
+
+const TEAM_ONLY_PASS_BASE_MS = 5 * 60 * 1000;
+const TEAM_ONLY_PASS_MAX_MS = 60 * 60 * 1000;
+
+/**
+ * Backoff for ambient team-only passes — the passes that run when cloud backup
+ * is off, so their only job is moving shared notes and team-space content.
+ * Once collaboration stopped being a paid feature most signed-in accounts run
+ * these, and the majority have neither shared notes nor team spaces: three
+ * requests every five minutes to confirm nothing changed.
+ *
+ * Each consecutive pass that moves nothing doubles the wait to a one-hour
+ * ceiling; the first pass that moves anything resets it, so an active
+ * collaborator is never slower than before. Deliberate work — a manual sync,
+ * a local push, a retry — bypasses this entirely.
+ */
+export function teamOnlyPassDelayMs(emptyStreak: number): number {
+  if (emptyStreak <= 1) return 0;
+  return Math.min(TEAM_ONLY_PASS_MAX_MS, TEAM_ONLY_PASS_BASE_MS * 2 ** (emptyStreak - 1));
+}
+
+export function shouldRunAmbientTeamOnlyPass(state: {
+  emptyStreak: number;
+  lastPassAt: number | null;
+  now: number;
+}): boolean {
+  if (state.lastPassAt == null) return true;
+  return state.now - state.lastPassAt >= teamOnlyPassDelayMs(state.emptyStreak);
+}
+
+/**
+ * The empty streak after an ambient pass. Insights counters are the second kind
+ * of work such a pass can move, and they get their own input rather than
+ * borrowing the team flag: a pass that uploaded counters did real work and
+ * resets the backoff, while merely having the opt-in on does not — that
+ * conflation would pin every backup-off Insights account to the 5-minute
+ * cadence teamOnlyPassDelayMs exists to remove.
+ */
+export function nextAmbientEmptyStreak(
+  emptyStreak: number,
+  moved: { team: boolean; analytics: boolean }
+): number {
+  return moved.team || moved.analytics ? 0 : emptyStreak + 1;
+}
+
 export interface PullCursorAdvance {
   // The pass's own cursor ("lastSyncedAt.<kind>", or ".<kind>.team" on a
   // team-only pass).

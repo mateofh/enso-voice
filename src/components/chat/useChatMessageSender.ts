@@ -1,6 +1,6 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import type { ChatPersistence } from "./useChatPersistence";
-import type { ChatStreaming } from "./useChatStreaming";
+import type { ChatStreaming, SendToAIOptions } from "./useChatStreaming";
 import type { Message } from "./types";
 
 interface PersistedMessageContext {
@@ -14,8 +14,29 @@ interface UseChatMessageSenderOptions {
   persistence: ChatPersistence;
   streaming: Pick<ChatStreaming, "sendToAI">;
   createConversation: (text: string) => Promise<number>;
-  onBeforeSend?: () => void;
   onMessagePersisted?: (context: PersistedMessageContext) => void | Promise<void>;
+  onSendingChange?: (sending: boolean) => void;
+}
+
+export interface MessageSubmissionLock {
+  run: (operation: () => Promise<void>) => Promise<boolean>;
+}
+
+export function createMessageSubmissionLock(): MessageSubmissionLock {
+  let active = false;
+
+  return {
+    async run(operation: () => Promise<void>): Promise<boolean> {
+      if (active) return false;
+      active = true;
+      try {
+        await operation();
+        return true;
+      } finally {
+        active = false;
+      }
+    },
+  };
 }
 
 export function useChatMessageSender({
@@ -23,30 +44,63 @@ export function useChatMessageSender({
   persistence,
   streaming,
   createConversation,
-  onBeforeSend,
   onMessagePersisted,
-}: UseChatMessageSenderOptions): (text: string) => Promise<void> {
-  return useCallback(
-    async (text: string) => {
-      onBeforeSend?.();
-      const convId = conversationId ?? (await createConversation(text));
-      const previousMessages = persistence.messages;
-      const userMessage: Message = {
-        id: crypto.randomUUID(),
-        role: "user",
-        content: text,
-        isStreaming: false,
-      };
+  onSendingChange,
+}: UseChatMessageSenderOptions): (text: string, options?: SendToAIOptions) => Promise<boolean> {
+  const submissionLockRef = useRef<MessageSubmissionLock | null>(null);
+  if (submissionLockRef.current === null) {
+    submissionLockRef.current = createMessageSubmissionLock();
+  }
 
-      persistence.setMessages((messages) => [...messages, userMessage]);
-      await persistence.saveUserMessage(text);
-      await onMessagePersisted?.({
-        conversationId: convId,
-        text,
-        isFirstMessage: previousMessages.length === 0,
+  return useCallback(
+    async (text: string, options?: SendToAIOptions) => {
+      const version = persistence.getSessionVersion?.();
+      const isCurrent = () => version === persistence.getSessionVersion?.();
+      let submitted = false;
+      const accepted = await submissionLockRef.current!.run(async () => {
+        onSendingChange?.(true);
+        try {
+          const convId = conversationId ?? (await createConversation(text));
+          if (!isCurrent()) return;
+          const previousMessages = persistence.messages;
+          const userMessage: Message = {
+            id: crypto.randomUUID(),
+            role: "user",
+            content: text,
+            isStreaming: false,
+          };
+
+          persistence.setMessages((messages) => [...messages, userMessage]);
+          await persistence.saveUserMessage(text);
+          if (!isCurrent()) return;
+          await onMessagePersisted?.({
+            conversationId: convId,
+            text,
+            isFirstMessage: previousMessages.length === 0,
+          });
+          if (!isCurrent()) return;
+          submitted = true;
+          await streaming.sendToAI(text, [...previousMessages, userMessage], {
+            ...options,
+            // A late result still belongs to this conversation after navigation or New chat.
+            persistAssistantMessage: (content, toolCalls) =>
+              persistence.saveAssistantMessage(content, toolCalls, convId),
+          });
+        } catch (error) {
+          if (isCurrent()) throw error;
+        } finally {
+          onSendingChange?.(false);
+        }
       });
-      await streaming.sendToAI(text, [...previousMessages, userMessage]);
+      return accepted && submitted;
     },
-    [conversationId, createConversation, onBeforeSend, onMessagePersisted, persistence, streaming]
+    [
+      conversationId,
+      createConversation,
+      onMessagePersisted,
+      onSendingChange,
+      persistence,
+      streaming,
+    ]
   );
 }

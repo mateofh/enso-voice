@@ -1,8 +1,9 @@
 import type { ReasoningConfig } from "../../BaseReasoningService";
+import type { DictationToneStyle } from "../../../config/toneStyle";
 
 export interface ProviderContext {
   getApiKey(provider: string): Promise<string>;
-  getSystemPrompt(agentName: string | null): string;
+  getSystemPrompt(agentName: string | null, toneStyle?: DictationToneStyle | null): string;
   getCustomDictionary(): string[];
   getPreferredLanguage(): string;
   getUiLanguage(): string;
@@ -33,5 +34,7 @@ export interface ProviderCallParams {
 
 export interface InferenceProvider {
   readonly id: string;
+  /** True when this client can send `config.screenContext` as image content. */
+  readonly supportsImages?: boolean;
   call(params: ProviderCallParams): Promise<string>;
 }

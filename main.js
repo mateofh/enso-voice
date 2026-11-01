@@ -1,6 +1,8 @@
 // Chromium picks the display backend before JS runs, so appendSwitch is too
 // late — the flag has to come from a relaunch.
 const { XWAYLAND_FLAG, shouldForceXWayland } = require("./src/helpers/xwayland");
+const { createHotkeyRepeatGate } = require("./src/helpers/hotkeyRepeatGate");
+const { shouldDisableGpuCompositing } = require("./src/helpers/linuxGpuCompositing");
 
 if (shouldForceXWayland(process.argv)) {
   const { spawn } = require("child_process");
@@ -99,12 +101,24 @@ require("dotenv").config({
   override: false,
 });
 
+// Chromium's Windows-only occlusion tracker misclassifies the always-on-top
+// transparent pill as occluded, throttling its renderer and jittering animations.
+if (process.platform === "win32") {
+  app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
+}
+
 // Fix transparent window flickering on Linux: --enable-transparent-visuals requires
 // the compositor to set up an ARGB visual before any windows are created.
-// --disable-gpu-compositing prevents GPU compositing conflicts with the compositor.
 if (process.platform === "linux") {
   app.commandLine.appendSwitch("gtk-version", "3");
   app.commandLine.appendSwitch("enable-transparent-visuals");
+}
+
+// Linux composites on the GPU except while an NVIDIA driver is loaded (#203). Anyone else whose
+// transparent windows flicker can add --disable-gpu-compositing to the launcher's flags file
+// (scripts/lib/linux-launcher.js).
+const gpuCompositingDisabledForNvidia = shouldDisableGpuCompositing();
+if (gpuCompositingDisabledForNvidia) {
   app.commandLine.appendSwitch("disable-gpu-compositing");
 }
 
@@ -144,6 +158,8 @@ function getOAuthProtocol() {
 
 const OAUTH_PROTOCOL = getOAuthProtocol();
 
+const { registerLinuxUrlSchemeHandler } = require("./src/helpers/linuxUrlSchemeHandler");
+
 function shouldRegisterProtocolWithAppArg() {
   return Boolean(process.defaultApp) || isElectronBinaryExec();
 }
@@ -179,9 +195,10 @@ function restoreHtmlHandlerIfChanged(original) {
 
 // True source of truth for whether openwhispr:// resolves on Linux — the same
 // MIME database xdg-open consults. Returns true for deb/rpm/flatpak/AUR installs
-// (scheme registered via the packaged .desktop MimeType) and false for AppImage/
-// tar.gz runs where it genuinely isn't registered, so we never enable a dead-end
-// OAuth flow. Used to recover from setAsDefaultProtocolClient's KDE false negative.
+// (scheme registered via the packaged .desktop MimeType; registerLinuxUrlSchemeHandler
+// first takes it back from an AppImage/tar.gz entry) and false for AppImage/tar.gz
+// runs whose own registration failed, so we never enable a dead-end OAuth flow.
+// Used to recover from setAsDefaultProtocolClient's KDE false negative.
 function isOAuthSchemeRegistered() {
   if (process.platform !== "linux") return false;
   try {
@@ -197,17 +214,22 @@ function isOAuthSchemeRegistered() {
   }
 }
 
-// Register custom protocol for OAuth callbacks.
 // In development, always include the app path argument so macOS/Windows/Linux
 // can launch the project app instead of opening bare Electron.
+function getProtocolAppArgs() {
+  if (!shouldRegisterProtocolWithAppArg()) return [];
+  return [process.argv[1] ? path.resolve(process.argv[1]) : path.resolve(".")];
+}
+
+// Register custom protocol for OAuth callbacks.
 function registerOpenWhisprProtocol() {
   const protocol = OAUTH_PROTOCOL;
   const htmlHandler = process.platform === "linux" ? getDefaultHtmlHandler() : null;
+  const appArgs = getProtocolAppArgs();
 
   let result;
-  if (shouldRegisterProtocolWithAppArg()) {
-    const appArg = process.argv[1] ? path.resolve(process.argv[1]) : path.resolve(".");
-    result = app.setAsDefaultProtocolClient(protocol, process.execPath, [appArg]);
+  if (appArgs.length > 0) {
+    result = app.setAsDefaultProtocolClient(protocol, process.execPath, appArgs);
   } else {
     result = app.setAsDefaultProtocolClient(protocol);
   }
@@ -219,11 +241,18 @@ function registerOpenWhisprProtocol() {
   return result;
 }
 
-// setAsDefaultProtocolClient returns a false negative on KDE/Wayland, so on Linux
-// fall back to probing the system MIME database for an actual handler. This keeps
-// OAuth enabled where the callback can resolve (deb/rpm/flatpak/AUR) and correctly
-// gated where it can't (AppImage/tar.gz with no scheme registration).
-const protocolRegistered = registerOpenWhisprProtocol() || isOAuthSchemeRegistered();
+// On Linux, setAsDefaultProtocolClient can only name open-whispr.desktop, which
+// AppImage and tar.gz installs don't have, so those (and development) register
+// their own handler entry first and skip it. Otherwise it runs as before, and
+// since it returns a false negative on KDE/Wayland, fall back to probing the
+// system MIME database for an actual handler. This keeps OAuth enabled where the
+// callback can resolve and correctly gated where it can't.
+const linuxSchemeHandler =
+  process.platform === "linux"
+    ? registerLinuxUrlSchemeHandler(OAUTH_PROTOCOL, getProtocolAppArgs())
+    : null;
+const protocolRegistered =
+  linuxSchemeHandler?.registered || registerOpenWhisprProtocol() || isOAuthSchemeRegistered();
 if (!protocolRegistered) {
   console.warn(`[Auth] Failed to register ${OAUTH_PROTOCOL}:// protocol handler`);
 }
@@ -266,6 +295,7 @@ const ParakeetManager = require("./src/helpers/parakeet");
 const DiarizationManager = require("./src/helpers/diarization");
 const TrayManager = require("./src/helpers/tray");
 const dockManager = require("./src/helpers/dockManager");
+const autoStart = require("./src/helpers/autoStart");
 const IPCHandlers = require("./src/helpers/ipcHandlers");
 const CliBridge = require("./src/helpers/cliBridge");
 const UpdateManager = require("./src/updater");
@@ -274,13 +304,27 @@ const DevServerManager = require("./src/helpers/devServerManager");
 const WindowsKeyManager = require("./src/helpers/windowsKeyManager");
 const LinuxKeyManager = require("./src/helpers/linuxKeyManager");
 const TextEditMonitor = require("./src/helpers/textEditMonitor");
+const SelectionManager = require("./src/helpers/selectionManager");
+const { AssistantPasteTarget } = require("./src/helpers/assistantPasteTarget");
+const { PermissionGuideManager } = require("./src/helpers/permissionGuideManager");
 const WhisperCudaManager = require("./src/helpers/whisperCudaManager");
 const WhisperVulkanManager = require("./src/helpers/whisperVulkanManager");
+const {
+  migrateLegacyBinDir,
+  detectOrphanedGpuPacks,
+  detectOutdatedGpuPacks,
+} = require("./src/helpers/gpuBinaryManager");
+const { resetWhisperGpuFailureOnUpgrade } = require("./src/helpers/whisperGpuUpgradeReset");
 const GoogleCalendarManager = require("./src/helpers/googleCalendarManager");
+const MicrosoftCalendarManager = require("./src/helpers/microsoftCalendarManager");
 const AppleCalendarManager = require("./src/helpers/appleCalendarManager");
 const CalendarReminderScheduler = require("./src/helpers/calendarReminderScheduler");
 const MeetingProcessDetector = require("./src/helpers/meetingProcessDetector");
 const AudioActivityDetector = require("./src/helpers/audioActivityDetector");
+const {
+  collectAudioCaptureHelperPids,
+  createExcludedProcessIdProvider,
+} = require("./src/helpers/electronProcessIds");
 const AudioTapManager = require("./src/helpers/audioTapManager");
 const LinuxPortalAudioManager = require("./src/helpers/linuxPortalAudioManager");
 const WindowsLoopbackAudioManager = require("./src/helpers/windowsLoopbackAudioManager");
@@ -299,6 +343,7 @@ let windowManager = null;
 let hotkeyManager = null;
 let databaseManager = null;
 let clipboardManager = null;
+let connectorManager = null;
 let whisperManager = null;
 let parakeetManager = null;
 let diarizationManager = null;
@@ -308,9 +353,11 @@ let globeKeyManager = null;
 let windowsKeyManager = null;
 let linuxKeyManager = null;
 let textEditMonitor = null;
+let selectionManager = null;
 let whisperCudaManager = null;
 let whisperVulkanManager = null;
 let googleCalendarManager = null;
+let microsoftCalendarManager = null;
 let appleCalendarManager = null;
 let calendarReminderScheduler = null;
 let meetingDetectionEngine = null;
@@ -318,10 +365,12 @@ let audioTapManager = null;
 let linuxPortalAudioManager = null;
 let windowsLoopbackAudioManager = null;
 let meetingAecManager = null;
-let qdrantManager = null;
+let semanticSearch = null;
 let ipcHandlers = null;
 let cliBridge = null;
 let globeKeyAlertShown = false;
+let macAccessibilityFeaturesReady = false;
+let startMacAccessibilityFeatures = null;
 let authBridgeServer = null;
 let pendingNoteCloudId = null;
 let pendingNoteRetryTimer = null;
@@ -378,26 +427,212 @@ function cleanupOrphanedLinuxRestoreToken() {
   } catch {}
 }
 
+function syncAutoStartEntry() {
+  try {
+    if (autoStart.syncAutoStartEntry()) {
+      debugLogger.info("Re-pointed the launch-at-login entry at the current executable");
+    }
+  } catch (error) {
+    debugLogger.warn("Failed to sync the launch-at-login entry", { error: error?.message });
+  }
+}
+
+// Reading the login item touches the OS, and failing to answer "did the session
+// start us?" must not stop the app from starting at all. Falling back to false
+// just shows the window, which is what every launch did before.
+function wasLaunchedAtLoginHidden() {
+  try {
+    return autoStart.wasLaunchedAtLoginHidden();
+  } catch (error) {
+    if (debugLogger) debugLogger.warn("Failed to detect a login launch", { error: error?.message });
+    return false;
+  }
+}
+
 function initializeCoreManagers() {
   setupProductionPath();
 
   debugLogger = require("./src/helpers/debugLogger");
   debugLogger.ensureFileLogging();
+  if (process.platform === "linux") {
+    // The compositing mode is settled once the GPU process has reported its info; a GPU
+    // process crash can still drop it to software later, logged below.
+    app
+      .getGPUInfo("basic")
+      .catch(() => {})
+      .then(() => {
+        debugLogger.info("Linux GPU compositing", {
+          status: app.getGPUFeatureStatus().gpu_compositing,
+          disabledForNvidia: gpuCompositingDisabledForNvidia,
+        });
+      });
+  }
+  app.on("child-process-gone", (_event, details) => {
+    if (details.type !== "GPU") return;
+    debugLogger.warn("GPU process gone", { reason: details.reason, exitCode: details.exitCode });
+  });
+  // Registration runs before app ready, when the logger cannot write its file yet.
+  if (linuxSchemeHandler?.reason) {
+    debugLogger.warn("Could not register the Linux URL scheme handler entry", {
+      protocol: OAUTH_PROTOCOL,
+      reason: linuxSchemeHandler.reason,
+      protocolRegistered,
+    });
+  }
 
   environmentManager = new EnvironmentManager();
-  const uiLanguage = environmentManager.getUiLanguage();
-  process.env.UI_LANGUAGE = uiLanguage;
+  const uiLanguage = environmentManager.getUiLanguage(app.getLocale());
   changeLanguage(uiLanguage);
   debugLogger.refreshLogLevel();
 
   windowManager = new WindowManager();
   hotkeyManager = windowManager.hotkeyManager;
   databaseManager = new DatabaseManager();
+  // Restore the last validated account scope before any window, IPC handler,
+  // or meeting flow can read or create notes. Offline launches keep the
+  // account's data visible; a stale or rotated credential fails the hash
+  // check and restores nothing.
+  const accountScopeBinding = require("./src/helpers/accountScopeBinding");
+  const bootAccountId = accountScopeBinding.resolveBootAccountScope({
+    token: require("./src/helpers/tokenStore").get(),
+    binding: accountScopeBinding.read(),
+  });
+  if (bootAccountId) databaseManager.setActiveAccountId(bootAccountId);
   clipboardManager = new ClipboardManager();
+  const { createConnectorManager } = require("./src/helpers/connectors/connectorManager");
+  const { createPendingActions } = require("./src/helpers/connectors/pendingActions");
+  const { createActionLog } = require("./src/helpers/connectors/actionLog");
+  const { createCredentialStore } = require("./src/helpers/connectors/credentialStore");
+  const { createConnectorCredentials } = require("./src/helpers/connectors/connectorCredentials");
+  const { createConnectors } = require("./src/helpers/connectors/createConnectors");
+  const { runOAuthLoopbackFlow, OAuthFlowError } = require("./src/helpers/oauthLoopbackFlow");
+  const { broadcastToWindows } = require("./src/helpers/windowBroadcast");
+  const { connectorAccountIdFrom } = require("./src/helpers/connectors/connectorIpc");
+  // The same account receipts are filed under (ipcHandlers' getAccountScope):
+  // the one bound to the credential in use. databaseManager's scope doesn't
+  // move when one signed-in token replaces another.
+  const getConnectorAccountScope = () =>
+    accountScopeBinding.resolveActiveAccountScope({
+      ...require("./src/helpers/tokenStore").getState(),
+      binding: accountScopeBinding.read(),
+    });
+  const getConnectorAccountId = connectorAccountIdFrom(getConnectorAccountScope);
+  const connectorCredentials = createConnectorCredentials({
+    store: createCredentialStore({
+      dir: path.join(app.getPath("userData"), "connectors"),
+      secretCrypto: require("./src/helpers/secretCrypto"),
+      logger: debugLogger,
+    }),
+    getAccountId: getConnectorAccountId,
+  });
+  connectorManager = createConnectorManager({
+    connectors: createConnectors({
+      fetch: (url, init) => net.fetch(url, { ...init, useSessionCookies: false }),
+      i18n: i18nMain,
+      runOAuthLoopbackFlow,
+      OAuthFlowError,
+      credentials: connectorCredentials,
+      logger: debugLogger,
+      env: process.env,
+      openExternal: (url) => require("./src/helpers/externalUrlOpener").openExternalUrl(url),
+      writeClipboard: (text, webContents) => clipboardManager.writeClipboard(text, webContents),
+      // Read only when revoking a Gmail login on the calendar's Google project;
+      // the calendar manager is created below.
+      getGoogleCalendarAccounts: () => googleCalendarManager?.getAccounts() ?? [],
+      broadcast: broadcastToWindows,
+      notifyStatusChanged: () => void connectorManager?.notifyStatusChanged(),
+    }),
+    pendingActions: createPendingActions(),
+    actionLog: createActionLog(databaseManager),
+    logger: debugLogger,
+    getAccountId: getConnectorAccountId,
+    credentials: connectorCredentials,
+    onStatusChanged: (statuses) => broadcastToWindows("connector-status-changed", statuses),
+  });
+  // Pending cards expire in main even when no renderer ever answers them.
+  setInterval(() => connectorManager.sweepExpired(), 60 * 1000).unref();
   whisperManager = new WhisperManager();
   if (process.platform !== "darwin") {
     whisperCudaManager = new WhisperCudaManager();
     whisperVulkanManager = new WhisperVulkanManager();
+    // Heal installs from before GPU packs got per-pack directories; must run
+    // before startup pre-warm resolves any GPU binary path.
+    const LlamaVulkanManager = require("./src/helpers/llamaVulkanManager");
+    const llamaVulkanManager = new LlamaVulkanManager();
+    const clearedPacks = migrateLegacyBinDir([
+      whisperCudaManager,
+      whisperVulkanManager,
+      llamaVulkanManager,
+    ]);
+    if (clearedPacks.length > 0) {
+      // No window exists yet — persist the notice; the window that shows it
+      // as a toast takes it (#1606, #2554).
+      require("./src/helpers/gpuPackMigrationNotice").record(clearedPacks);
+    }
+    // The 1.8.3 migration deleted lib-carrying packs without recording that
+    // notice, leaving those users on a silent CPU fallback: an enabled flag
+    // with no pack on disk only happens via such data loss. recordOnce gates
+    // each pack to one notice so a dismissed toast doesn't return every launch.
+    const gpuPacks = [
+      {
+        manager: whisperCudaManager,
+        enabledEnvVar: "WHISPER_CUDA_ENABLED",
+        group: "whisper",
+        backend: "cuda",
+      },
+      {
+        manager: whisperVulkanManager,
+        enabledEnvVar: "WHISPER_VULKAN_ENABLED",
+        group: "whisper",
+        backend: "vulkan",
+      },
+      { manager: llamaVulkanManager, enabledEnvVar: "LLAMA_VULKAN_ENABLED" },
+    ];
+    // A pack whose backend failed here and then vanished (a distro launcher
+    // deletes it, #2168) was no loss: drop its flag as a delete would, so no
+    // notice names it, even after an upgrade clears the remembered failure.
+    const failedBackends = WhisperManager.resolveFailedGpuBackends(process.env.WHISPER_GPU_FAILED);
+    for (const { manager, enabledEnvVar, backend } of gpuPacks) {
+      if (
+        failedBackends.includes(backend) &&
+        process.env[enabledEnvVar] === "true" &&
+        !manager.isDownloaded() &&
+        !manager.needsUpdate()
+      ) {
+        delete process.env[enabledEnvVar];
+        environmentManager.removeKeyFromEnvFile(enabledEnvVar).catch((err) => {
+          debugLogger.error("Failed to clear a vanished GPU pack's flag from .env", {
+            key: enabledEnvVar,
+            error: err.message,
+          });
+        });
+      }
+    }
+    const orphanedPacks = detectOrphanedGpuPacks(gpuPacks);
+    if (orphanedPacks.length > 0) {
+      require("./src/helpers/gpuPackMigrationNotice").recordOnce(orphanedPacks);
+    }
+    // A pack an older release installed that this version can't use (#2424)
+    // otherwise looks like a pack that was never downloaded: say so once per
+    // app version, even to a user who already saw the orphan notice for it.
+    // Only whisper packs can be outdated, so only a user on local whisper
+    // (the only mode whose Settings shows the pack) is told.
+    const outdatedPacks = detectOutdatedGpuPacks(gpuPacks);
+    if (outdatedPacks.length > 0) {
+      const whisperInUse = !!process.env.LOCAL_WHISPER_MODEL;
+      debugLogger.info("GPU packs from an older release need re-downloading", {
+        packs: outdatedPacks,
+        notified: whisperInUse,
+      });
+      if (whisperInUse) {
+        require("./src/helpers/gpuPackMigrationNotice").recordOnce(
+          outdatedPacks,
+          `outdated-${app.getVersion()}`
+        );
+      }
+    }
+    // Lets every server start resolve its GPU backend from installed packs
+    whisperManager.setGpuBinaryManagers({ cuda: whisperCudaManager, vulkan: whisperVulkanManager });
   }
   parakeetManager = new ParakeetManager();
   diarizationManager = new DiarizationManager();
@@ -407,11 +642,27 @@ function initializeCoreManagers() {
     windowManager,
     calendarReminderScheduler
   );
+  microsoftCalendarManager = new MicrosoftCalendarManager(
+    databaseManager,
+    calendarReminderScheduler
+  );
   appleCalendarManager = new AppleCalendarManager(databaseManager, calendarReminderScheduler);
+  const meetingProcessDetector = new MeetingProcessDetector();
   meetingDetectionEngine = new MeetingDetectionEngine(
     calendarReminderScheduler,
-    new MeetingProcessDetector(),
-    new AudioActivityDetector(),
+    meetingProcessDetector,
+    new AudioActivityDetector(
+      // The capture-helper managers are created a few lines below; the provider
+      // is only invoked on mic events, long after initialization completes.
+      createExcludedProcessIdProvider(() =>
+        collectAudioCaptureHelperPids([
+          audioTapManager,
+          linuxPortalAudioManager,
+          windowsLoopbackAudioManager,
+        ])
+      ),
+      () => meetingProcessDetector.getDetectedProcesses().length > 0
+    ),
     windowManager,
     databaseManager
   );
@@ -422,6 +673,7 @@ function initializeCoreManagers() {
   windowsKeyManager = new WindowsKeyManager();
   linuxKeyManager = new LinuxKeyManager();
   textEditMonitor = new TextEditMonitor();
+  selectionManager = new SelectionManager({ clipboardManager, textEditMonitor });
   audioTapManager = new AudioTapManager();
   linuxPortalAudioManager = new LinuxPortalAudioManager();
   windowsLoopbackAudioManager = new WindowsLoopbackAudioManager();
@@ -429,10 +681,22 @@ function initializeCoreManagers() {
   // doesn't pay the probe spawn. No-ops on non-Windows.
   windowsLoopbackAudioManager.getCapability().catch(() => {});
   cleanupOrphanedLinuxRestoreToken();
+  syncAutoStartEntry();
   meetingAecManager = new MeetingAecManager();
   windowManager.textEditMonitor = textEditMonitor;
+  windowManager.selectionManager = selectionManager;
+  windowManager.assistantPasteTarget = new AssistantPasteTarget({
+    textEditMonitor,
+    selectionManager,
+  });
   windowManager.windowsKeyManager = windowsKeyManager;
   windowManager.linuxKeyManager = linuxKeyManager;
+  windowManager.permissionGuide = new PermissionGuideManager(windowManager);
+  if (process.platform === "linux") {
+    windowManager.hotkeyManager.nativeListenerProbe = () => linuxKeyManager.checkAvailability();
+  } else if (process.platform === "win32") {
+    windowManager.hotkeyManager.nativeListenerProbe = () => windowsKeyManager.checkAvailability();
+  }
 
   // IPC handlers must be registered before window content loads
   ipcHandlers = new IPCHandlers({
@@ -447,15 +711,19 @@ function initializeCoreManagers() {
     windowsKeyManager,
     linuxKeyManager,
     textEditMonitor,
+    selectionManager,
     whisperCudaManager,
     whisperVulkanManager,
     googleCalendarManager,
+    microsoftCalendarManager,
     appleCalendarManager,
+    connectorManager,
     meetingDetectionEngine,
     audioTapManager,
     linuxPortalAudioManager,
     windowsLoopbackAudioManager,
     meetingAecManager,
+    getSemanticSearch: () => semanticSearch,
     getTrayManager: () => trayManager,
     oauthProtocolRegistered: protocolRegistered,
     oauthProtocol: OAUTH_PROTOCOL,
@@ -483,9 +751,14 @@ function initializeDeferredManagers() {
       "clipboard"
     );
   });
-  clipboardManager.preWarmAccessibility();
+  if (process.platform !== "darwin") {
+    clipboardManager.preWarmAccessibility();
+  }
   trayManager = new TrayManager();
-  globeKeyManager = new GlobeKeyManager();
+  globeKeyManager = new GlobeKeyManager({
+    // Lets the listener put the user's macOS Globe action back after a crash.
+    preferenceStatePath: path.join(app.getPath("userData"), "globe-preference-state.json"),
+  });
 
   if (process.platform === "darwin") {
     globeKeyManager.on("error", (error) => {
@@ -515,8 +788,36 @@ function initializeDeferredManagers() {
   }
 
   googleCalendarManager.start();
+  microsoftCalendarManager.start();
   appleCalendarManager.start();
   meetingDetectionEngine.start();
+}
+
+let pendingEnterpriseAudioTest = null;
+// The control panel acts on each link once, so a link it can't use never
+// reopens Settings on a later mount; Settings still reads it until consumed.
+let enterpriseAudioTestClaimed = false;
+ipcMain.handle("get-pending-enterprise-audio-test", (_event, consume = false) => {
+  const pending = pendingEnterpriseAudioTest;
+  if (consume) pendingEnterpriseAudioTest = null;
+  return pending;
+});
+ipcMain.handle("claim-enterprise-audio-test", () => {
+  if (enterpriseAudioTestClaimed) return null;
+  enterpriseAudioTestClaimed = true;
+  return pendingEnterpriseAudioTest;
+});
+function handleEnterpriseAudioLink(url) {
+  const request = require("./src/helpers/enterpriseAudioDeepLink").parseEnterpriseAudioDeepLink(
+    url,
+    OAUTH_PROTOCOL
+  );
+  if (!request) return false;
+  pendingEnterpriseAudioTest = request;
+  enterpriseAudioTestClaimed = false;
+  void windowManager?.showControlPanel();
+  windowManager?.controlPanelWindow?.webContents.send("enterprise-audio-test-requested");
+  return true;
 }
 
 app.on("open-url", (event, url) => {
@@ -527,6 +828,8 @@ app.on("open-url", (event, url) => {
     handleUpgradeDeepLink();
     return;
   }
+
+  if (handleEnterpriseAudioLink(url)) return;
 
   if (isNoteDeepLink(url)) {
     void handleNoteDeepLink(url);
@@ -540,11 +843,7 @@ app.on("open-url", (event, url) => {
 
   void handleOAuthDeepLink(url);
 
-  if (windowManager && isLiveWindow(windowManager.controlPanelWindow)) {
-    windowManager.controlPanelWindow.show();
-    windowManager.controlPanelWindow.focus();
-    dockManager.setControlPanelVisible(true);
-  }
+  windowManager?.showControlPanel();
 });
 
 function isInvitationDeepLink(url) {
@@ -644,9 +943,7 @@ function handleInvitationDeepLink(deepLinkUrl) {
     pendingInvitationDeepLinkToken = token;
     if (!windowManager) return;
     if (isLiveWindow(windowManager.controlPanelWindow)) {
-      windowManager.controlPanelWindow.show();
-      windowManager.controlPanelWindow.focus();
-      dockManager.setControlPanelVisible(true);
+      windowManager.showControlPanel();
       // Best-effort fast path — the get-pending-invitation-token pull is the reliable path.
       windowManager.controlPanelWindow.webContents.send("workspace-invitation-token", token);
     } else {
@@ -668,7 +965,7 @@ function resolveAuthUrl() {
     process.env.AUTH_URL ||
     process.env.VITE_AUTH_URL ||
     runtimeEnv.VITE_AUTH_URL ||
-    "https://auth.ensovoice.com"
+    "https://voice.beenso.com"
   );
 }
 
@@ -755,9 +1052,7 @@ async function applySessionTokenAndRefresh(token) {
       oauthProtocol: OAUTH_PROTOCOL,
     });
   }
-  windowManager.controlPanelWindow.show();
-  windowManager.controlPanelWindow.focus();
-  dockManager.setControlPanelVisible(true);
+  windowManager.showControlPanel();
 }
 
 async function handleOAuthDeepLink(deepLinkUrl) {
@@ -782,9 +1077,7 @@ function handleUpgradeDeepLink() {
     windowManager.controlPanelWindow.webContents.executeJavaScript(
       'window.dispatchEvent(new Event("upgrade-success"))'
     );
-    windowManager.controlPanelWindow.show();
-    windowManager.controlPanelWindow.focus();
-    dockManager.setControlPanelVisible(true);
+    windowManager.showControlPanel();
   }
 }
 
@@ -877,13 +1170,59 @@ function startAuthBridgeServer() {
   });
 }
 
+// Startup restores the saved activation mode before any hotkey registers. Desktop
+// backends (GNOME, KDE, Hyprland) register the saved hotkey a moment later, in
+// this mode, so check that hotkey rather than the provisional default it
+// replaces: a supported Hold is kept and an unsupported one becomes Tap before
+// registration. Elsewhere, check the hotkey that registered. This is a runtime
+// fallback, not a change to the user's saved preference: the next launch retries it.
+async function dropUnsupportedStartupHold() {
+  if (windowManager.getActivationMode() !== "push") return;
+  const manager = windowManager.hotkeyManager;
+  const hotkey = manager.isUsingNativeShortcut()
+    ? await manager.getSavedDictationHotkey()
+    : manager.getCurrentHotkey();
+  if (!manager.supportsPushToTalk(hotkey)) {
+    const changed = await windowManager.setActivationModeCache("tap");
+    if (changed) {
+      for (const browserWindow of BrowserWindow.getAllWindows()) {
+        if (!browserWindow.isDestroyed()) {
+          browserWindow.webContents.send("setting-updated", {
+            key: "activationMode",
+            value: "tap",
+          });
+        }
+      }
+    }
+  }
+}
+
+// A desktop backend that cannot register falls back to globalShortcut after the
+// first check, and globalShortcut may still be reading the saved hotkey, so
+// check again once that registration settles.
+async function checkStartupHold() {
+  windowManager.hotkeyManager.once("hotkey-loaded", () => {
+    dropUnsupportedStartupHold().catch((err) => {
+      debugLogger.warn("[HotkeyManager] Startup activation mode recheck failed", {
+        error: err.message,
+      });
+    });
+  });
+  await dropUnsupportedStartupHold();
+}
+
 // Main application startup
 async function startApp() {
-  reapStaleSidecars();
+  // Await so a stale sidecar is confirmed dead before new ones can spawn and
+  // contend for its port or storage lock.
+  await reapStaleSidecars();
 
   // Phase 1: Core managers + IPC handlers before windows
   initializeCoreManagers();
   await environmentManager.init();
+  // After any upgrade the GPU gets one fresh attempt: clear the remembered
+  // failure before the whisper pre-warm below resolves its GPU backend.
+  resetWhisperGpuFailureOnUpgrade(environmentManager);
   registerSidecars();
   startAuthBridgeServer();
 
@@ -897,13 +1236,34 @@ async function startApp() {
 
   applyOpenWhisprOriginHeader(session.defaultSession);
 
-  windowManager.setActivationModeCache(environmentManager.getActivationMode());
+  await windowManager.setActivationModeCache(environmentManager.getActivationMode());
   windowManager.setFloatingIconAutoHide(environmentManager.getFloatingIconAutoHide());
   windowManager.setPanelStartPosition(environmentManager.getPanelStartPosition());
 
+  let activationModeChangeQueue = Promise.resolve();
   ipcMain.on("activation-mode-changed", (_event, mode) => {
-    windowManager.setActivationModeCache(mode);
-    environmentManager.saveActivationMode(mode);
+    activationModeChangeQueue = activationModeChangeQueue
+      .then(async () => {
+        const success = await windowManager.setActivationModeCache(mode);
+        const effectiveMode = windowManager.getActivationMode();
+        if (success) {
+          environmentManager.saveActivationMode(effectiveMode);
+        } else {
+          for (const browserWindow of BrowserWindow.getAllWindows()) {
+            if (!browserWindow.isDestroyed()) {
+              browserWindow.webContents.send("setting-updated", {
+                key: "activationMode",
+                value: effectiveMode,
+              });
+            }
+          }
+        }
+        windowManager.resetWindowsPushState();
+        windowManager.reconcileNativeKeyListeners();
+      })
+      .catch((err) => {
+        debugLogger.error("Failed to change activation mode", { error: err.message }, "hotkey");
+      });
   });
 
   ipcMain.on("floating-icon-auto-hide-changed", (_event, enabled) => {
@@ -932,10 +1292,15 @@ async function startApp() {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
-  // Create windows FIRST so the user sees UI as soon as possible
-  const startMinimized = environmentManager.getStartMinimized();
-  if (debugLogger) debugLogger.info("Start minimized", { enabled: startMinimized });
+  // Create windows FIRST so the user sees UI as soon as possible.
+  // A login launch goes to the tray whatever the preference says: the user asked
+  // the OS to start us, not to put a window in front of them at every login.
+  const launchedHidden = wasLaunchedAtLoginHidden();
+  const startMinimized = environmentManager.getStartMinimized() || launchedHidden;
+  if (debugLogger) debugLogger.info("Start minimized", { enabled: startMinimized, launchedHidden });
+  windowManager.startedMinimized = startMinimized;
   await windowManager.createMainWindow();
+  await checkStartupHold();
   if (!startMinimized) {
     await windowManager.createControlPanelWindow();
   }
@@ -943,7 +1308,9 @@ async function startApp() {
   // Windows/Linux cold start delivers protocol URLs via argv (macOS uses
   // open-url); without this scan a deep link that launches the app is lost.
   const initialProtocolUrl = process.argv.find((arg) => arg.startsWith(`${OAUTH_PROTOCOL}://`));
-  if (initialProtocolUrl && isNoteDeepLink(initialProtocolUrl)) {
+  if (initialProtocolUrl && handleEnterpriseAudioLink(initialProtocolUrl)) {
+    // The renderer consumes the saved setup request after settings mount.
+  } else if (initialProtocolUrl && isNoteDeepLink(initialProtocolUrl)) {
     await handleNoteDeepLink(initialProtocolUrl);
   } else {
     if (initialProtocolUrl && process.platform !== "darwin") {
@@ -958,26 +1325,14 @@ async function startApp() {
     await flushPendingNoteDeepLink();
   }
 
-  // Create agent window (hidden) and set up agent hotkey
-  await windowManager.createAgentWindow();
-
-  const agentHotkeyCallback = () => {
-    if (hotkeyManager.isInListeningMode()) return;
-    windowManager.toggleAgentOverlay();
-  };
-  windowManager._agentHotkeyCallback = agentHotkeyCallback;
-
-  const savedAgentKey = environmentManager.getAgentKey?.() || "";
-  if (savedAgentKey) {
-    const result = await hotkeyManager.registerSlot("agent", savedAgentKey, agentHotkeyCallback);
-    if (!result.success) {
-      debugLogger.warn("Failed to restore agent hotkey", { hotkey: savedAgentKey }, "hotkey");
-    }
-  }
+  await hotkeyManager.hyprlandRegistrationReady;
 
   // Set up voice agent hotkey (dictation routed straight to the dictation
-  // agent, bypassing cleanup)
+  // agent, bypassing cleanup). Tap-only slots gate autorepeat like the
+  // dictation toggle does.
+  const isVoiceAgentPress = createHotkeyRepeatGate();
   const voiceAgentHotkeyCallback = () => {
+    if (!isVoiceAgentPress()) return;
     windowManager.sendToggleVoiceAgent();
   };
   windowManager._voiceAgentHotkeyCallback = voiceAgentHotkeyCallback;
@@ -996,11 +1351,14 @@ async function startApp() {
         "hotkey"
       );
     }
+    hotkeyManager.notifyRestoreFailures(savedVoiceAgentKey, result);
   }
 
   // Set up translation hotkey (dictation cleaned up and translated into the
   // configured target language before pasting)
+  const isTranslationPress = createHotkeyRepeatGate();
   const translationHotkeyCallback = () => {
+    if (!isTranslationPress()) return;
     windowManager.sendToggleTranslation();
   };
   windowManager._translationHotkeyCallback = translationHotkeyCallback;
@@ -1019,13 +1377,16 @@ async function startApp() {
         "hotkey"
       );
     }
+    hotkeyManager.notifyRestoreFailures(savedTranslationKey, result);
   }
 
   // Set up meeting mode hotkey
+  const isMeetingPress = createHotkeyRepeatGate();
   const meetingHotkeyCallback = () => {
-    if (hotkeyManager.isInListeningMode()) return;
+    if (!isMeetingPress()) return;
     debugLogger.info("Meeting hotkey triggered", {}, "meeting");
-    meetingDetectionEngine?.startManualMeeting();
+    // Usually pressed mid-call: an open panel updates behind the meeting app.
+    windowManager.startManualMeeting({ activate: false });
   };
 
   const savedMeetingKey = environmentManager.getMeetingKey?.() || "";
@@ -1040,6 +1401,7 @@ async function startApp() {
       { savedMeetingKey, ...result },
       "meeting"
     );
+    hotkeyManager.notifyRestoreFailures(savedMeetingKey, result);
   }
 
   ipcMain.handle("register-meeting-hotkey", async (_event, hotkey) => {
@@ -1054,7 +1416,8 @@ async function startApp() {
       }
       return { success: false, message: result.error };
     } else {
-      hotkeyManager.unregisterSlot("meeting");
+      const removed = await hotkeyManager.unregisterSlot("meeting");
+      if (removed === false) return { success: false };
       environmentManager.saveMeetingKey("");
       windowManager.reconcileNativeKeyListeners();
       return { success: true };
@@ -1063,9 +1426,15 @@ async function startApp() {
 
   // Phase 2: Initialize remaining managers after windows are visible
   initializeDeferredManagers();
+  if (process.platform === "darwin") {
+    // Restore a Globe preference marker left by a crash without starting any
+    // Accessibility-protected event monitors during onboarding.
+    await globeKeyManager.restoreLeftoverSystemPreference();
+  }
 
   app.on("browser-window-focus", () => {
     if (googleCalendarManager) googleCalendarManager.syncOnFocus();
+    if (microsoftCalendarManager) microsoftCalendarManager.syncOnFocus();
     if (appleCalendarManager) appleCalendarManager.syncOnFocus();
   });
 
@@ -1075,6 +1444,7 @@ async function startApp() {
     if (googleCalendarManager) {
       googleCalendarManager.onWakeFromSleep();
     }
+    if (microsoftCalendarManager) microsoftCalendarManager.onWakeFromSleep();
     if (appleCalendarManager) appleCalendarManager.onWakeFromSleep();
     // Sleep evicts the local GPU model from VRAM; reload it once the driver settles. See #766.
     if (wakeRewarmTimer) clearTimeout(wakeRewarmTimer);
@@ -1086,16 +1456,10 @@ async function startApp() {
     }, WHISPER_WAKE_REWARM_DELAY_MS);
   });
 
-  // Non-blocking server pre-warming. CUDA wins when both GPU backends are enabled.
-  const useCuda = process.env.WHISPER_CUDA_ENABLED === "true" && whisperCudaManager?.isDownloaded();
+  // Non-blocking server pre-warming; GPU backend resolved by the manager
   const whisperSettings = {
     localTranscriptionProvider: process.env.LOCAL_TRANSCRIPTION_PROVIDER || "",
     whisperModel: process.env.LOCAL_WHISPER_MODEL,
-    useCuda,
-    useVulkan:
-      !useCuda &&
-      process.env.WHISPER_VULKAN_ENABLED === "true" &&
-      whisperVulkanManager?.isDownloaded(),
   };
   whisperManager.initializeAtStartup(whisperSettings).catch((err) => {
     debugLogger.debug("Whisper startup init error (non-fatal)", { error: err.message });
@@ -1104,6 +1468,7 @@ async function startApp() {
   const parakeetSettings = {
     localTranscriptionProvider: process.env.LOCAL_TRANSCRIPTION_PROVIDER || "",
     parakeetModel: process.env.PARAKEET_MODEL,
+    language: process.env.DICTATION_LANGUAGE,
   };
   parakeetManager.initializeAtStartup(parakeetSettings).catch((err) => {
     debugLogger.debug("Parakeet startup init error (non-fatal)", { error: err.message });
@@ -1145,36 +1510,18 @@ async function startApp() {
   }
 
   const QdrantManager = require("./src/helpers/qdrantManager");
-  qdrantManager = new QdrantManager();
-  sidecarRegistry.register("qdrant", () => qdrantManager.stop());
-  if (qdrantManager.isAvailable()) {
-    qdrantManager
-      .start()
-      .then(() => {
-        if (qdrantManager.isReady()) {
-          const vectorIndex = require("./src/helpers/vectorIndex");
-          vectorIndex.init(qdrantManager.getPort());
-          vectorIndex
-            .ensureCollection()
-            .then(() => ipcHandlers?.drainPendingVectorPurges())
-            .catch((err) => {
-              debugLogger.debug("Qdrant collection setup error (non-fatal)", {
-                error: err.message,
-              });
-            });
-        }
-      })
-      .catch((err) => {
-        debugLogger.debug("Qdrant startup error (non-fatal)", { error: err.message });
-      });
-  }
-
+  const SemanticSearchLifecycle = require("./src/helpers/semanticSearchLifecycle");
   const localEmbeddings = require("./src/helpers/localEmbeddings");
-  if (!localEmbeddings.isAvailable()) {
-    localEmbeddings.downloadModel().catch((err) => {
-      debugLogger.debug("Embedding model download error (non-fatal)", { error: err.message });
-    });
-  }
+  const qdrantManager = new QdrantManager();
+  semanticSearch = new SemanticSearchLifecycle({
+    qdrant: qdrantManager,
+    vectorIndex: require("./src/helpers/vectorIndex"),
+    embeddings: localEmbeddings,
+    noteEmbedText: localEmbeddings.LocalEmbeddings.noteEmbedText,
+    database: databaseManager,
+    logger: debugLogger,
+  });
+  sidecarRegistry.register("qdrant", () => semanticSearch.stop());
 
   if (process.platform === "win32") {
     const nircmdStatus = clipboardManager.getNircmdStatus();
@@ -1183,6 +1530,9 @@ async function startApp() {
 
   trayManager.setWindows(windowManager.mainWindow, windowManager.controlPanelWindow);
   trayManager.setWindowManager(windowManager);
+  // The tray's listen item is a toggle, so it has to rebuild when dictation
+  // starts or stops.
+  windowManager.onDictationStateChanged = () => trayManager.updateTrayMenu();
   trayManager.setCreateControlPanelCallback(() => windowManager.createControlPanelWindow());
   await trayManager.createTray();
 
@@ -1213,7 +1563,9 @@ async function startApp() {
       // Handle dictation if Globe/Fn is one of the dictation hotkeys
       const dictationUsesGlobe = hotkeyManager.getSlotHotkeys("dictation").some(isGlobeLikeHotkey);
       if (dictationUsesGlobe) {
-        if (mainWindowLive) {
+        if (mainWindowLive && windowManager.isDictationProcessing()) {
+          debugLogger?.debug("[Globe] Ignored — dictation processing");
+        } else if (mainWindowLive) {
           // Capture target app PID BEFORE showing the overlay
           if (textEditMonitor) textEditMonitor.captureTargetPid();
           const activationMode = windowManager.getActivationMode();
@@ -1224,6 +1576,7 @@ async function startApp() {
               return;
             }
             windowManager.showDictationPanel();
+            windowManager.sendPrepareDictation();
             const pressTime = now;
             globeKeyDownTime = pressTime;
             globeKeyIsRecording = false;
@@ -1242,24 +1595,20 @@ async function startApp() {
         }
       }
 
-      // Check agent and voice agent slots for Globe/Fn key
-      const agentUsesGlobe = hotkeyManager.getSlotHotkeys("agent").some(isGlobeLikeHotkey);
+      // Check voice agent slot for Globe/Fn key
       const voiceAgentUsesGlobe = hotkeyManager
         .getSlotHotkeys("voiceAgent")
         .some(isGlobeLikeHotkey);
       const translationUsesGlobe = hotkeyManager
         .getSlotHotkeys("translation")
         .some(isGlobeLikeHotkey);
-      if (agentUsesGlobe) {
-        windowManager.toggleAgentOverlay();
-      }
       if (voiceAgentUsesGlobe) {
         windowManager.sendToggleVoiceAgent();
       }
       if (translationUsesGlobe) {
         windowManager.sendToggleTranslation();
       }
-      if (!agentUsesGlobe && !voiceAgentUsesGlobe && !translationUsesGlobe && !dictationUsesGlobe) {
+      if (!voiceAgentUsesGlobe && !translationUsesGlobe && !dictationUsesGlobe) {
         debugLogger?.debug("[Globe] Ignored — hotkey is not GLOBE", { currentHotkey });
       }
     });
@@ -1275,12 +1624,21 @@ async function startApp() {
       if (hotkeyManager.getSlotHotkeys("dictation").some(isGlobeLikeHotkey)) {
         const activationMode = windowManager.getActivationMode();
         if (activationMode === "push") {
-          globeKeyDownTime = 0;
-          globeLastStopTime = Date.now();
-          if (globeKeyIsRecording) {
-            globeKeyIsRecording = false;
-            debugLogger?.debug("[Globe] Stopping dictation (push release)");
-            windowManager.sendStopDictation();
+          if (globeKeyDownTime === 0 && !globeKeyIsRecording) {
+            // The press was ignored (dictation was processing); releasing it
+            // must not cancel preparation or hide the thinking pill.
+            debugLogger?.debug("[Globe] Release without a registered press — ignored");
+          } else {
+            globeKeyDownTime = 0;
+            globeLastStopTime = Date.now();
+            if (globeKeyIsRecording) {
+              globeKeyIsRecording = false;
+              debugLogger?.debug("[Globe] Stopping dictation (push release)");
+              windowManager.sendStopDictation();
+            } else {
+              windowManager.sendCancelDictationPreparation();
+              windowManager.hideDictationPanel();
+            }
           }
         }
       }
@@ -1306,6 +1664,7 @@ async function startApp() {
       if (wasRecording) {
         windowManager.sendCancelDictation();
       } else {
+        windowManager.sendCancelDictationPreparation();
         windowManager.hideDictationPanel();
       }
     });
@@ -1323,10 +1682,8 @@ async function startApp() {
     let rightModActiveKey = null;
 
     globeKeyManager.on("right-modifier-down", async (modifier) => {
-      // Check agent and voice agent slots for right-modifier
-      if (hotkeyManager.slotHasHotkey("agent", modifier)) {
-        windowManager.toggleAgentOverlay();
-      }
+      hotkeyManager.logHotkeyEvent("macos-native", "down", modifier);
+      // Check voice agent slot for right-modifier
       if (hotkeyManager.slotHasHotkey("voiceAgent", modifier)) {
         windowManager.sendToggleVoiceAgent();
       }
@@ -1336,6 +1693,7 @@ async function startApp() {
 
       if (!hotkeyManager.slotHasHotkey("dictation", modifier)) return;
       if (!isLiveWindow(windowManager.mainWindow)) return;
+      if (windowManager.isDictationProcessing()) return;
 
       const activationMode = windowManager.getActivationMode();
       if (textEditMonitor) textEditMonitor.captureTargetPid();
@@ -1344,6 +1702,7 @@ async function startApp() {
         const now = Date.now();
         if (now - rightModLastStopTime < POST_STOP_COOLDOWN_MS) return;
         windowManager.showDictationPanel();
+        windowManager.sendPrepareDictation();
         const pressTime = now;
         rightModActiveKey = modifier;
         rightModDownTime = pressTime;
@@ -1360,19 +1719,27 @@ async function startApp() {
     });
 
     globeKeyManager.on("right-modifier-up", async (modifier) => {
+      hotkeyManager.logHotkeyEvent("macos-native", "up", modifier);
       if (hotkeyManager.slotHasHotkey("dictation", modifier)) {
         if (!isLiveWindow(windowManager.mainWindow)) return;
 
         const activationMode = windowManager.getActivationMode();
         if (activationMode === "push" && (!rightModActiveKey || rightModActiveKey === modifier)) {
-          rightModActiveKey = null;
-          rightModDownTime = 0;
-          rightModLastStopTime = Date.now();
-          if (rightModIsRecording) {
-            rightModIsRecording = false;
-            windowManager.sendStopDictation();
+          if (rightModDownTime === 0 && !rightModIsRecording) {
+            // The press was ignored (dictation was processing); releasing it
+            // must not cancel preparation or hide the thinking pill.
+            debugLogger?.debug("[RightMod] Release without a registered press — ignored");
           } else {
-            windowManager.hideDictationPanel();
+            rightModActiveKey = null;
+            rightModDownTime = 0;
+            rightModLastStopTime = Date.now();
+            if (rightModIsRecording) {
+              rightModIsRecording = false;
+              windowManager.sendStopDictation();
+            } else {
+              windowManager.sendCancelDictationPreparation();
+              windowManager.hideDictationPanel();
+            }
           }
         }
       }
@@ -1389,14 +1756,11 @@ async function startApp() {
       }
     });
 
-    const syncSuppressedMouseButtons = () => {
-      const buttons = [];
-      for (const slotName of ["dictation", "agent", "voiceAgent", "translation"]) {
-        for (const hotkey of hotkeyManager.getSlotHotkeys(slotName)) {
-          if (isMouseButtonHotkey(hotkey)) buttons.push(hotkey);
-        }
-      }
-      globeKeyManager.setSuppressedMouseButtons(buttons);
+    const MAC_NATIVE_HOTKEY_SLOTS = ["dictation", "voiceAgent", "translation"];
+    const syncMacNativeHotkeyConfiguration = () => {
+      globeKeyManager.setConfiguration(
+        hotkeyManager.getMacNativeListenerConfig(MAC_NATIVE_HOTKEY_SLOTS)
+      );
     };
 
     // Mouse Button 4/5 handling (e.g., Logitech MX Master side buttons)
@@ -1408,10 +1772,8 @@ async function startApp() {
     globeKeyManager.on("mouse-button-down", async (button) => {
       if (hotkeyManager.isInListeningMode && hotkeyManager.isInListeningMode()) return;
       if (!isMouseButtonHotkey(button)) return;
+      hotkeyManager.logHotkeyEvent("macos-native", "down", button);
 
-      if (hotkeyManager.slotHasHotkey("agent", button)) {
-        windowManager.toggleAgentOverlay();
-      }
       if (hotkeyManager.slotHasHotkey("voiceAgent", button)) {
         windowManager.sendToggleVoiceAgent();
       }
@@ -1421,6 +1783,7 @@ async function startApp() {
 
       if (!hotkeyManager.slotHasHotkey("dictation", button)) return;
       if (!isLiveWindow(windowManager.mainWindow)) return;
+      if (windowManager.isDictationProcessing()) return;
 
       const activationMode = windowManager.getActivationMode();
       if (textEditMonitor) textEditMonitor.captureTargetPid();
@@ -1430,6 +1793,7 @@ async function startApp() {
         const now = Date.now();
         if (now - mouseButtonLastStopTime < POST_STOP_COOLDOWN_MS) return;
         windowManager.showDictationPanel();
+        windowManager.sendPrepareDictation();
         const pressTime = now;
         mouseButtonActiveButton = button;
         mouseButtonDownTime = pressTime;
@@ -1448,6 +1812,7 @@ async function startApp() {
     globeKeyManager.on("mouse-button-up", async (button) => {
       if (hotkeyManager.isInListeningMode && hotkeyManager.isInListeningMode()) return;
       if (!isMouseButtonHotkey(button)) return;
+      hotkeyManager.logHotkeyEvent("macos-native", "up", button);
 
       if (!hotkeyManager.slotHasHotkey("dictation", button)) return;
       if (!isLiveWindow(windowManager.mainWindow)) return;
@@ -1457,32 +1822,28 @@ async function startApp() {
         activationMode === "push" &&
         (!mouseButtonActiveButton || mouseButtonActiveButton === button)
       ) {
-        mouseButtonActiveButton = null;
-        mouseButtonDownTime = 0;
-        mouseButtonLastStopTime = Date.now();
-        if (mouseButtonIsRecording) {
-          mouseButtonIsRecording = false;
-          windowManager.sendStopDictation();
+        if (mouseButtonDownTime === 0 && !mouseButtonIsRecording) {
+          // The press was ignored (dictation was processing); releasing it
+          // must not cancel preparation or hide the thinking pill.
+          debugLogger?.debug("[MouseButton] Release without a registered press — ignored");
         } else {
-          windowManager.hideDictationPanel();
+          mouseButtonActiveButton = null;
+          mouseButtonDownTime = 0;
+          mouseButtonLastStopTime = Date.now();
+          if (mouseButtonIsRecording) {
+            mouseButtonIsRecording = false;
+            windowManager.sendStopDictation();
+          } else {
+            windowManager.sendCancelDictationPreparation();
+            windowManager.hideDictationPanel();
+          }
         }
       }
     });
 
-    syncSuppressedMouseButtons();
-    globeKeyManager.start();
-    hotkeyManager.once("hotkey-loaded", syncSuppressedMouseButtons);
-
-    ipcMain.on("hotkey-listening-mode-changed", (_event, enabled) => {
-      if (enabled) {
-        globeKeyManager.setSuppressedMouseButtons([]);
-      } else {
-        syncSuppressedMouseButtons();
-      }
-    });
-
-    // After starting globe-listener, check if accessibility is granted.
-    // If not, notify the control panel so it can prompt the user.
+    // If accessibility is missing, notify the normal control panel after the
+    // protected macOS features have started. During onboarding the permissions
+    // screen owns this guidance, so its event has no ControlPanel listener.
     const checkAndNotifyAccessibility = () => {
       if (!systemPreferences.isTrustedAccessibilityClient(false)) {
         debugLogger.info("[Accessibility] macOS accessibility not trusted — notifying renderers");
@@ -1492,8 +1853,32 @@ async function startApp() {
       }
     };
 
-    // Check shortly after startup (give windows time to load)
-    setTimeout(checkAndNotifyAccessibility, 3000);
+    let accessibilityFeaturesStarted = false;
+    startMacAccessibilityFeatures = () => {
+      if (accessibilityFeaturesStarted) return;
+      accessibilityFeaturesStarted = true;
+      clipboardManager.preWarmAccessibility();
+      syncMacNativeHotkeyConfiguration();
+      globeKeyManager.start();
+      setTimeout(checkAndNotifyAccessibility, 3000);
+    };
+
+    if (macAccessibilityFeaturesReady) {
+      startMacAccessibilityFeatures();
+    }
+
+    hotkeyManager.on("hotkey-loaded", syncMacNativeHotkeyConfiguration);
+
+    ipcMain.on("hotkey-listening-mode-changed", (_event, enabled) => {
+      if (enabled) {
+        startMacAccessibilityFeatures();
+        // Let mouse buttons through so they can be captured, but keep macOS's
+        // Globe action down so choosing Globe cannot flash the emoji viewer.
+        globeKeyManager.setConfiguration({ mouseButtons: [], suppressGlobeAction: true });
+      } else {
+        syncMacNativeHotkeyConfiguration();
+      }
+    });
 
     // Allow renderer to request an accessibility check (e.g. on sign-in).
     // Also sends accessibility-missing events if untrusted.
@@ -1516,7 +1901,7 @@ async function startApp() {
       mouseButtonDownTime = 0;
       mouseButtonIsRecording = false;
       mouseButtonLastStopTime = 0;
-      syncSuppressedMouseButtons();
+      syncMacNativeHotkeyConfiguration();
     });
   }
 
@@ -1529,9 +1914,10 @@ async function startApp() {
     const nativeKeyManager = isWindows ? windowsKeyManager : linuxKeyManager;
     debugLogger.debug("[Push-to-Talk] Native key listener setup starting");
 
-    // Dictation supports push-to-talk and needs the overlay window; agent/meeting
-    // drive other windows (matching their globalShortcut callbacks and macOS).
+    // Dictation supports push-to-talk and needs the overlay window; meeting
+    // drives other windows (matching their globalShortcut callbacks and macOS).
     const dispatchNativeKeyDown = (key) => {
+      hotkeyManager.logHotkeyEvent("native-listener", "down", key);
       if (hotkeyManager.slotHasHotkey("dictation", key)) {
         if (!isLiveWindow(windowManager.mainWindow)) return;
         if (windowManager.getActivationMode() === "push") {
@@ -1545,15 +1931,14 @@ async function startApp() {
         windowManager.sendToggleVoiceAgent();
       } else if (hotkeyManager.slotHasHotkey("translation", key)) {
         windowManager.sendToggleTranslation();
-      } else if (hotkeyManager.slotHasHotkey("agent", key)) {
-        if (!hotkeyManager.isInListeningMode()) windowManager.toggleAgentOverlay();
       } else if (hotkeyManager.slotHasHotkey("meeting", key)) {
-        if (!hotkeyManager.isInListeningMode()) meetingDetectionEngine?.startManualMeeting();
+        windowManager.startManualMeeting({ activate: false });
       }
     };
 
     // Only dictation drives push-to-talk, so only its key-up matters.
     const dispatchNativeKeyUp = (key) => {
+      hotkeyManager.logHotkeyEvent("native-listener", "up", key);
       if (!hotkeyManager.slotHasHotkey("dictation", key)) return;
       if (windowManager.winPushState?.active) {
         windowManager.handleWindowsPushKeyUp(key);
@@ -1599,8 +1984,15 @@ async function startApp() {
         debugLogger.warn(
           "[Push-to-Talk] Linux key listener has no permission to access input devices"
         );
-        if (isLiveWindow(windowManager.mainWindow)) {
-          windowManager.mainWindow.webContents.send("linux-ptt-permission-denied");
+        // GNOME, KDE and Hyprland run this listener only as a spare release
+        // source in Hold; their own shortcut still presses and releases.
+        if (!hotkeyManager.reliesOnLinuxKeyListener()) return;
+        // Settings owns the recovery (toast, Hold disabled, back to Tap) and it
+        // renders in the control panel, not the pill this event used to reach.
+        for (const browserWindow of BrowserWindow.getAllWindows()) {
+          if (!browserWindow.isDestroyed()) {
+            browserWindow.webContents.send("linux-ptt-permission-denied");
+          }
         }
       });
     }
@@ -1608,17 +2000,29 @@ async function startApp() {
     const STARTUP_DELAY_MS = 3000;
     setTimeout(() => windowManager.reconcileNativeKeyListeners(), STARTUP_DELAY_MS);
 
-    ipcMain.on("activation-mode-changed", () => {
-      windowManager.resetWindowsPushState();
-      windowManager.reconcileNativeKeyListeners();
-    });
-
     ipcMain.on("hotkey-changed", () => {
       windowManager.resetWindowsPushState();
       windowManager.reconcileNativeKeyListeners();
     });
   }
 }
+
+ipcMain.on("mac-accessibility-features-ready", (_event, expectedAccountScope) => {
+  if (process.platform !== "darwin") return;
+  if (expectedAccountScope) {
+    const accountScopeBinding = require("./src/helpers/accountScopeBinding");
+    const currentAccountScope = accountScopeBinding.resolveActiveAccountScope({
+      ...require("./src/helpers/tokenStore").getState(),
+      binding: accountScopeBinding.read(),
+    });
+    if (!accountScopeBinding.matchesActiveAccountScope(expectedAccountScope, currentAccountScope)) {
+      debugLogger.info("[Accessibility] Ignoring stale account-scoped readiness signal");
+      return;
+    }
+  }
+  macAccessibilityFeaturesReady = true;
+  startMacAccessibilityFeatures?.();
+});
 
 // Listen for usage limit reached from dictation overlay, forward to control panel
 ipcMain.on("limit-reached", (_event, data) => {
@@ -1636,12 +2040,7 @@ if (gotSingleInstanceLock) {
     }
 
     if (isLiveWindow(windowManager.controlPanelWindow)) {
-      if (windowManager.controlPanelWindow.isMinimized()) {
-        windowManager.controlPanelWindow.restore();
-      }
-      windowManager.controlPanelWindow.show();
-      windowManager.controlPanelWindow.focus();
-      dockManager.setControlPanelVisible(true);
+      windowManager.showControlPanel();
       if (windowManager.controlPanelWindow.webContents.isCrashed()) {
         windowManager.loadControlPanel();
       }
@@ -1658,6 +2057,7 @@ if (gotSingleInstanceLock) {
     // Check for OAuth protocol URL in command line arguments (Windows/Linux)
     const url = commandLine.find((arg) => arg.startsWith(`${OAUTH_PROTOCOL}://`));
     if (url) {
+      if (handleEnterpriseAudioLink(url)) return;
       if (url.includes("upgrade-success")) {
         handleUpgradeDeepLink();
       } else if (isNoteDeepLink(url)) {
@@ -1742,12 +2142,7 @@ if (gotSingleInstanceLock) {
     } else {
       // Show control panel when dock icon is clicked (most common user action)
       if (windowManager && isLiveWindow(windowManager.controlPanelWindow)) {
-        if (windowManager.controlPanelWindow.isMinimized()) {
-          windowManager.controlPanelWindow.restore();
-        }
-        windowManager.controlPanelWindow.show();
-        windowManager.controlPanelWindow.focus();
-        dockManager.setControlPanelVisible(true);
+        windowManager.showControlPanel();
       } else if (windowManager) {
         // If control panel doesn't exist, create it
         windowManager.createControlPanelWindow();
@@ -1773,7 +2168,13 @@ if (gotSingleInstanceLock) {
     }
     event.preventDefault();
     performSyncTeardown();
-    sidecarRegistry.shutdownAll().finally(() => app.exit(0));
+    Promise.allSettled([
+      sidecarRegistry.shutdownAll(),
+      Promise.race([
+        ipcHandlers?.metaActivation?.shutdown(),
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]),
+    ]).finally(() => app.exit(0));
   });
 }
 
@@ -1791,12 +2192,6 @@ function performSyncTeardown() {
     cliBridge.stop().catch(() => {});
     cliBridge = null;
   }
-  if (windowManager && isLiveWindow(windowManager.agentWindow)) {
-    windowManager.agentWindow.destroy();
-  }
-  if (windowManager && isLiveWindow(windowManager.transcriptionPreviewWindow)) {
-    windowManager.transcriptionPreviewWindow.destroy();
-  }
   if (hotkeyManager) {
     hotkeyManager.unregisterAll();
   } else {
@@ -1807,6 +2202,7 @@ function performSyncTeardown() {
   if (linuxKeyManager) linuxKeyManager.stop();
   if (meetingDetectionEngine) meetingDetectionEngine.stop();
   if (googleCalendarManager) googleCalendarManager.stop();
+  if (microsoftCalendarManager) microsoftCalendarManager.stop();
   if (appleCalendarManager) appleCalendarManager.stop();
   if (calendarReminderScheduler) calendarReminderScheduler.stop();
   if (audioTapManager) audioTapManager.stop().catch(() => {});

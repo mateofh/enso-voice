@@ -1,9 +1,12 @@
 import type { InferenceProvider } from "./types";
+import { getCloudModel } from "../../../models/ModelRegistry";
 import { wrapCleanupTranscript } from "../../../config/prompts";
 import logger from "../../../utils/logger";
+import { errorFromIpcResult } from "../../../helpers/ipcErrorFields";
 
 export const anthropicProvider: InferenceProvider = {
   id: "anthropic",
+  supportsImages: true,
   async call({ text, model, agentName, config, ctx }) {
     if (typeof window === "undefined" || !window.electronAPI) {
       throw new Error("Anthropic reasoning is not available in this environment");
@@ -14,8 +17,11 @@ export const anthropicProvider: InferenceProvider = {
 
     logger.logReasoning("ANTHROPIC_IPC_CALL", { model, textLength: text.length });
 
-    const systemPrompt = config.systemPrompt || ctx.getSystemPrompt(agentName);
+    const systemPrompt = config.systemPrompt || ctx.getSystemPrompt(agentName, config.toneStyle);
     const userContent = config.systemPrompt ? text : wrapCleanupTranscript(text);
+    // Claude models from Opus 4.7 onward reject `temperature` with a 400, so
+    // unknown models default to omitting it, which every model accepts.
+    const supportsTemperature = getCloudModel(model)?.supportsTemperature ?? false;
     const result = await window.electronAPI.processAnthropicReasoning(
       userContent,
       model,
@@ -23,6 +29,7 @@ export const anthropicProvider: InferenceProvider = {
       {
         ...config,
         systemPrompt,
+        supportsTemperature,
       }
     );
 
@@ -30,7 +37,9 @@ export const anthropicProvider: InferenceProvider = {
 
     if (!result.success) {
       logger.logReasoning("ANTHROPIC_ERROR", { model, processingTimeMs, error: result.error });
-      throw new Error(result.error);
+      // Main resolves with the serialized error (code, i18n key, status…) so the
+      // toast can translate it.
+      throw errorFromIpcResult(result);
     }
 
     logger.logReasoning("ANTHROPIC_SUCCESS", {

@@ -1,9 +1,33 @@
 const { net } = require("electron");
 const debugLogger = require("./debugLogger");
 const GoogleCalendarOAuth = require("./googleCalendarOAuth");
+const CalendarSyncInterval = require("./calendarSyncInterval");
+const { CALENDAR_LOOKBACK_MS } = require("./calendarCacheWindow");
+const { extractMeetingUrl } = require("./meetingJoinUrl");
 const { broadcastToWindows } = require("./windowBroadcast");
 
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
+const ALL_DAY_TIMEZONE_PADDING_MS = 48 * 60 * 60 * 1000;
+
+// Sync tokens pin the full sync's timeMin/timeMax window, so discard them
+// after a day to keep the lookahead covering the 31-day availability horizon.
+const SYNC_LOOKAHEAD_MS = 33 * 24 * 60 * 60 * 1000;
+const SYNC_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const GOOGLE_RESPONSE_STATUSES = new Set(["accepted", "declined", "tentative", "needsAction"]);
+
+// The browser opens an event link under its default Google account, so with
+// several signed in it finds no such event; authuser picks the calendar's own.
+function eventWebLink(htmlLink, accountEmail) {
+  if (!htmlLink) return null;
+  if (!accountEmail) return htmlLink;
+  try {
+    const url = new URL(htmlLink);
+    url.searchParams.set("authuser", accountEmail);
+    return url.toString();
+  } catch {
+    return htmlLink;
+  }
+}
 
 class GoogleCalendarManager {
   constructor(databaseManager, windowManager, reminderScheduler) {
@@ -12,11 +36,11 @@ class GoogleCalendarManager {
     this.reminderScheduler = reminderScheduler;
     this.oauth = new GoogleCalendarOAuth(databaseManager);
     this.accounts = new Map();
-    this.syncInterval = null;
-    this.SYNC_INTERVAL_MS = 2 * 60 * 1000;
-    this._consecutiveFailures = 0;
-    this._lastFocusSync = 0;
     this.primaryOnly = true;
+    this.syncRunner = new CalendarSyncInterval(
+      () => this.syncEvents().then(() => this.reminderScheduler.scheduleNextMeeting()),
+      { intervalMs: 2 * 60 * 1000, maxIntervalMs: 30 * 60 * 1000, logScope: "gcal" }
+    );
   }
 
   start() {
@@ -25,22 +49,16 @@ class GoogleCalendarManager {
 
     this.fetchCalendars()
       .then(() => this.syncEvents())
-      .then(() => {
-        this.reminderScheduler.scheduleNextMeeting();
-        this._consecutiveFailures = 0;
-      })
+      .then(() => this.reminderScheduler.scheduleNextMeeting())
       .catch((err) =>
         debugLogger.error("Initial calendar sync failed", { error: err.message }, "gcal")
       );
 
-    this._startSyncInterval();
+    this.syncRunner.start();
   }
 
   stop() {
-    if (this.syncInterval) {
-      clearInterval(this.syncInterval);
-      this.syncInterval = null;
-    }
+    this.syncRunner.stop();
   }
 
   isConnected() {
@@ -69,9 +87,8 @@ class GoogleCalendarManager {
 
     await this.fetchCalendars(result.email);
     await this.syncEvents();
-    this._consecutiveFailures = 0;
     this.reminderScheduler.scheduleNextMeeting();
-    this._startSyncInterval();
+    this.syncRunner.start();
     this._broadcastAccountsChanged();
 
     return result;
@@ -136,7 +153,7 @@ class GoogleCalendarManager {
     }
 
     this.databaseManager.applyPrimaryOnlyToSelection(this.primaryOnly);
-    this.databaseManager.removeEventsFromDeselectedCalendars();
+    this.databaseManager.removeEventsFromDeselectedCalendars("google");
     return allCalendars;
   }
 
@@ -162,54 +179,85 @@ class GoogleCalendarManager {
 
   async _syncCalendar(calendar) {
     const accountEmail = calendar.account_email;
-    const params = new URLSearchParams({
-      singleEvents: "true",
-      orderBy: "startTime",
-      timeMin: new Date().toISOString(),
-      timeMax: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    });
 
-    if (calendar.sync_token) {
-      params.delete("timeMin");
-      params.delete("timeMax");
-      params.delete("orderBy");
-      params.set("syncToken", calendar.sync_token);
-    }
+    const buildFullParams = () =>
+      new URLSearchParams({
+        singleEvents: "true",
+        orderBy: "startTime",
+        timeMin: new Date(Date.now() - CALENDAR_LOOKBACK_MS).toISOString(),
+        timeMax: new Date(
+          Date.now() + SYNC_LOOKAHEAD_MS + ALL_DAY_TIMEZONE_PADDING_MS
+        ).toISOString(),
+      });
 
-    let data;
-    try {
-      data = await this._apiGet(
-        `/calendars/${encodeURIComponent(calendar.id)}/events?${params.toString()}`,
-        accountEmail
-      );
-    } catch (err) {
-      // 410 Gone means syncToken is invalid; fall back to full sync
-      if (err.statusCode === 410) {
-        const fullParams = new URLSearchParams({
+    const hasFreshToken = Boolean(
+      calendar.sync_token && calendar.sync_token_expires_at > Date.now()
+    );
+    let isFullSync = !hasFreshToken;
+    let tokenExpiresAt = hasFreshToken
+      ? calendar.sync_token_expires_at
+      : Date.now() + SYNC_TOKEN_TTL_MS;
+    let baseParams = isFullSync
+      ? buildFullParams()
+      : new URLSearchParams({
           singleEvents: "true",
-          orderBy: "startTime",
-          timeMin: new Date().toISOString(),
-          timeMax: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          syncToken: calendar.sync_token,
         });
+    let pageToken = null;
+    let nextSyncToken = null;
+    const allItems = [];
+
+    while (true) {
+      const params = new URLSearchParams(baseParams);
+      if (pageToken) params.set("pageToken", pageToken);
+
+      let data;
+      try {
         data = await this._apiGet(
-          `/calendars/${encodeURIComponent(calendar.id)}/events?${fullParams.toString()}`,
+          `/calendars/${encodeURIComponent(calendar.id)}/events?${params.toString()}`,
           accountEmail
         );
-      } else {
+      } catch (err) {
+        // 410 Gone means syncToken is invalid; fall back to full sync
+        if (err.statusCode === 410 && !pageToken && !isFullSync) {
+          isFullSync = true;
+          tokenExpiresAt = Date.now() + SYNC_TOKEN_TTL_MS;
+          baseParams = buildFullParams();
+          continue;
+        }
         throw err;
       }
+
+      if (data.items) {
+        allItems.push(...data.items);
+      }
+      pageToken = data.nextPageToken || null;
+      if (data.nextSyncToken) {
+        nextSyncToken = data.nextSyncToken;
+      }
+
+      if (!pageToken) break;
     }
 
     const toUpsert = [];
     const toRemove = [];
+    const contactsToUpsert = [];
+    const notContacts = [];
+    const ownEmail = (accountEmail || "").toLowerCase();
+    // Google's self flag marks the calendar's owner: the user (possibly under
+    // an alias) on their primary calendar, a colleague on a shared one.
+    const selfIsUser = Boolean(calendar.is_primary) || calendar.id === accountEmail;
 
-    for (const item of data.items || []) {
+    for (const item of allItems) {
       if (item.status === "cancelled") {
         toRemove.push(item.id);
         continue;
       }
 
       const isAllDay = !item.start?.dateTime;
+      const selfAttendee = selfIsUser
+        ? item.attendees?.find((attendee) => attendee.self === true)
+        : item.attendees?.find((attendee) => attendee.email?.toLowerCase() === ownEmail);
       toUpsert.push({
         id: item.id,
         calendar_id: calendar.id,
@@ -219,9 +267,14 @@ class GoogleCalendarManager {
         end_time: item.end?.dateTime || item.end?.date,
         is_all_day: isAllDay,
         status: item.status || "confirmed",
-        hangout_link: item.hangoutLink || null,
+        availability_status: item.transparency === "transparent" ? "free" : "busy",
+        self_response_status: GOOGLE_RESPONSE_STATUSES.has(selfAttendee?.responseStatus)
+          ? selfAttendee.responseStatus
+          : "unknown",
+        hangout_link: item.hangoutLink || extractMeetingUrl([item.location, item.description]),
         conference_data: item.conferenceData ? JSON.stringify(item.conferenceData) : null,
         organizer_email: item.organizer?.email || null,
+        web_link: eventWebLink(item.htmlLink, accountEmail),
         attendees_count: item.attendees?.length || 0,
         attendees: item.attendees
           ? JSON.stringify(
@@ -229,56 +282,58 @@ class GoogleCalendarManager {
                 email: a.email,
                 displayName: a.displayName || null,
                 responseStatus: a.responseStatus || null,
-                self: a.self || false,
+                // Stored self means the user, as on Microsoft and Apple; on a
+                // shared calendar Google's flag marks the calendar's owner.
+                self: selfIsUser ? a.self === true : a.email?.toLowerCase() === ownEmail,
+                ...(a.resource ? { resource: true } : {}),
               }))
             )
           : null,
       });
-    }
 
-    if (toUpsert.length > 0) this.databaseManager.upsertCalendarEvents(toUpsert);
-    if (toRemove.length > 0) this.databaseManager.removeCalendarEvents(toRemove);
-    if (data.nextSyncToken)
-      this.databaseManager.updateCalendarSyncToken(calendar.id, data.nextSyncToken);
-
-    const contactsToUpsert = [];
-    for (const item of data.items || []) {
       if (item.attendees) {
         for (const a of item.attendees) {
-          if (a.email)
-            contactsToUpsert.push({ email: a.email, displayName: a.displayName || null });
+          if (!a.email) continue;
+          // Rooms and the user's own addresses aren't people to write to.
+          const isUser = a.email.toLowerCase() === ownEmail || (a.self && selfIsUser);
+          if (a.resource || isUser) notContacts.push(a.email);
+          else contactsToUpsert.push({ email: a.email, displayName: a.displayName || null });
         }
       }
     }
-    if (contactsToUpsert.length > 0) this.databaseManager.upsertContacts(contactsToUpsert);
+
+    // A full sync has no incremental baseline, so deletions that happened
+    // while the sync token was invalid never arrive as cancelled items —
+    // prune what the fresh snapshot no longer contains.
+    if (isFullSync) {
+      this.databaseManager.removeStaleCalendarEvents(
+        "google",
+        calendar.id,
+        toUpsert.map((event) => event.id)
+      );
+    }
+    if (toUpsert.length > 0) this.databaseManager.upsertCalendarEvents(toUpsert);
+    if (toRemove.length > 0) this.databaseManager.removeCalendarEvents(toRemove);
+    if (nextSyncToken) {
+      this.databaseManager.updateCalendarSyncToken(calendar.id, nextSyncToken, tokenExpiresAt);
+    }
+    this.databaseManager.syncCalendarContacts(
+      "google",
+      accountEmail,
+      contactsToUpsert,
+      notContacts
+    );
   }
 
   onWakeFromSleep() {
     this.syncEvents()
-      .then(() => {
-        this._consecutiveFailures = 0;
-        this._restartSyncInterval();
-      })
+      .then(() => this.syncRunner.notifySuccess())
       .catch((err) => debugLogger.error("Post-wake sync failed", { error: err.message }, "gcal"));
   }
 
   syncOnFocus() {
     if (!this.isConnected()) return;
-    const now = Date.now();
-    if (now - this._lastFocusSync < 30000) return;
-    this._lastFocusSync = now;
-
-    this.syncEvents()
-      .then(() => {
-        this.reminderScheduler.scheduleNextMeeting();
-        if (this._consecutiveFailures > 0) {
-          this._consecutiveFailures = 0;
-          this._restartSyncInterval();
-        }
-      })
-      .catch((err) =>
-        debugLogger.error("Focus-triggered sync failed", { error: err.message }, "gcal")
-      );
+    this.syncRunner.syncOnFocus();
   }
 
   getCalendars() {
@@ -288,7 +343,7 @@ class GoogleCalendarManager {
   async setCalendarSelection(calendarId, isSelected) {
     this.databaseManager.updateCalendarSelection(calendarId, isSelected);
     await this.syncEvents();
-    this._consecutiveFailures = 0;
+    this.syncRunner.notifySuccess();
     this.reminderScheduler.scheduleNextMeeting();
   }
 
@@ -320,50 +375,6 @@ class GoogleCalendarManager {
     return Array.from(this.accounts.keys());
   }
 
-  _startSyncInterval() {
-    if (this.syncInterval) clearInterval(this.syncInterval);
-
-    const interval = this._getSyncInterval();
-    debugLogger.info(
-      "Calendar sync scheduled",
-      { intervalMs: interval, consecutiveFailures: this._consecutiveFailures },
-      "gcal"
-    );
-
-    this.syncInterval = setInterval(() => {
-      this.syncEvents()
-        .then(() => {
-          this.reminderScheduler.scheduleNextMeeting();
-          if (this._consecutiveFailures > 0) {
-            this._consecutiveFailures = 0;
-            this._restartSyncInterval();
-          }
-        })
-        .catch((err) => {
-          this._consecutiveFailures++;
-          debugLogger.error(
-            "Calendar sync failed",
-            {
-              error: err.message,
-              consecutiveFailures: this._consecutiveFailures,
-              nextIntervalMs: this._getSyncInterval(),
-            },
-            "gcal"
-          );
-          this._restartSyncInterval();
-        });
-    }, interval);
-  }
-
-  _getSyncInterval() {
-    if (this._consecutiveFailures === 0) return this.SYNC_INTERVAL_MS;
-    return Math.min(this.SYNC_INTERVAL_MS * Math.pow(2, this._consecutiveFailures), 30 * 60 * 1000);
-  }
-
-  _restartSyncInterval() {
-    this._startSyncInterval();
-  }
-
   _broadcastAccountsChanged() {
     const accounts = this.getAccounts();
     broadcastToWindows("gcal-connection-changed", { accounts });
@@ -380,16 +391,20 @@ class GoogleCalendarManager {
       useSessionCookies: false,
     });
     const text = await response.text();
-    let parsed;
+    let parsed = null;
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new Error(`Invalid JSON response: ${text.slice(0, 200)}`);
+      // Error statuses can arrive with empty or non-JSON bodies; surface the
+      // status below instead of masking it as a parse failure.
     }
     if (response.status >= 400) {
-      const err = new Error(parsed.error?.message || `API error ${response.status}`);
+      const err = new Error(parsed?.error?.message || `API error ${response.status}`);
       err.statusCode = response.status;
       throw err;
+    }
+    if (parsed === null) {
+      throw new Error(`Invalid JSON response: ${text.slice(0, 200)}`);
     }
     return parsed;
   }

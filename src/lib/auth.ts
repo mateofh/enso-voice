@@ -1,6 +1,5 @@
 import { createAuthClient } from "better-auth/react";
 import { ssoClient } from "@better-auth/sso/client";
-import { OPENWHISPR_API_URL } from "../config/constants";
 import { openExternalLink } from "../utils/externalLinks";
 import {
   authContextFetch,
@@ -11,7 +10,7 @@ import {
   prepareAuthRequest,
 } from "./authRequestContext";
 
-export const AUTH_URL = import.meta.env.VITE_AUTH_URL || "https://auth.ensovoice.com";
+export const AUTH_URL = import.meta.env.VITE_AUTH_URL || "https://voice.beenso.com";
 export const authClient = createAuthClient({
   baseURL: AUTH_URL,
   plugins: [ssoClient()],
@@ -132,30 +131,11 @@ export function getGracePeriodRemainingMs(): number {
   return Math.max(0, GRACE_PERIOD_MS - Math.max(0, Date.now() - startedAt));
 }
 
-export async function deleteAccount(): Promise<{ error?: Error }> {
-  if (!OPENWHISPR_API_URL) {
-    return { error: new Error("API not configured") };
-  }
-
-  try {
-    const result = await window.electronAPI?.cloudApiRequest?.({
-      method: "DELETE",
-      path: "/api/auth/delete-account",
-    });
-    if (!result?.success) {
-      throw new Error(result?.error || "Failed to delete account");
-    }
-
-    return {};
-  } catch (error) {
-    return { error: error instanceof Error ? error : new Error("Failed to delete account") };
-  }
-}
-
 export async function signOut(): Promise<void> {
   credentialAccountCache = null;
+  await window.electronAPI?.closeActivationStream?.().catch(() => undefined);
   try {
-    await authClient.signOut();
+    await authClient.signOut({});
   } catch {
     // Local sign-out must still cross a credential generation boundary when
     // the server is offline; the remote session can expire independently.
@@ -196,7 +176,7 @@ export async function withSessionRefresh<T>(operation: () => Promise<T>): Promis
   }
 }
 
-const DESKTOP_OAUTH_CALLBACK_URL = "https://ensovoice.com/auth/desktop-callback";
+const DESKTOP_OAUTH_CALLBACK_URL = "https://voice.beenso.com/auth/desktop-callback";
 
 export async function signInWithSocial(provider: SocialProvider): Promise<{ error?: Error }> {
   try {
@@ -248,10 +228,13 @@ export async function signInWithSSO(email: string): Promise<{ error?: Error }> {
 
 export async function requestPasswordReset(email: string): Promise<{ error?: Error }> {
   try {
-    await authClient.requestPasswordReset({
+    const { error } = await authClient.requestPasswordReset({
       email: email.trim(),
-      redirectTo: "https://ensovoice.com/reset-password",
+      redirectTo: "https://voice.beenso.com/reset-password",
     });
+    if (error) {
+      return { error: toAuthActionError(error, "Failed to send reset email") };
+    }
     return {};
   } catch (error) {
     return { error: error instanceof Error ? error : new Error("Failed to send reset email") };
@@ -301,6 +284,36 @@ export async function changePassword(params: {
   }
 }
 
+export const ADMIN_URL = import.meta.env.VITE_ADMIN_URL || "https://admin.openwhispr.com";
+
+/**
+ * Open the enterprise admin console signed in: the desktop session lives in
+ * the app (bearer token), not the user's browser, so a single-use short-lived
+ * token carries it across. Verification on the console's /handoff page sets
+ * the cross-subdomain session cookie. If token generation fails for any
+ * reason, fall back to the bare console URL and let the user sign in there.
+ */
+export async function openAdminConsole(): Promise<void> {
+  let url = ADMIN_URL;
+  try {
+    // The generated $fetch types don't discriminate on `throw`, and the
+    // payload arrives bare or under `data` depending on the client version.
+    const result = (await authClient.$fetch("/one-time-token/generate", { throw: true })) as {
+      token?: string;
+      data?: { token?: string } | null;
+    };
+    const token = result.token ?? result.data?.token;
+    if (token) {
+      // The token rides the URL fragment so it never reaches server logs,
+      // proxies, or analytics beacons — the console reads it client-side.
+      url = `${ADMIN_URL}/handoff#token=${encodeURIComponent(token)}`;
+    }
+  } catch {
+    // Fall through to the bare console URL.
+  }
+  openExternalLink(url);
+}
+
 // Cache only successful results; errors fail open without being cached. Cleared
 // in signOut() so a different account never inherits a stale value.
 let credentialAccountCache: boolean | null = null;
@@ -308,7 +321,7 @@ let credentialAccountCache: boolean | null = null;
 export async function hasCredentialAccount(): Promise<boolean> {
   if (credentialAccountCache !== null) return credentialAccountCache;
   try {
-    const { data, error } = await authClient.listAccounts();
+    const { data, error } = await authClient.listAccounts({ query: {} });
     if (error || !data) return true;
     credentialAccountCache = data.some((account) => account.providerId === "credential");
     return credentialAccountCache;

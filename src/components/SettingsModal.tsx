@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { usePolicyStore } from "../stores/policyStore";
 import {
   Sliders,
   Mic,
@@ -9,10 +10,12 @@ import {
   Keyboard,
   CreditCard,
   Shield,
+  ShieldCheck,
   Users,
-} from "lucide-react";
+  SquareSparkle,
+} from "./icons";
 import SidebarModal, { type SidebarItem } from "./ui/SidebarModal";
-import SettingsPage, { SettingsSectionType } from "./SettingsPage";
+import SettingsPage, { AccountAvatar, SettingsSectionType } from "./SettingsPage";
 import { useAuth } from "../hooks/useAuth";
 import { ENSO_BETA_FEATURES } from "../config/product";
 
@@ -21,12 +24,16 @@ export type { SettingsSectionType };
 // The old AI Models sidebar had four items (transcription, meetings,
 // intelligence, agentMode) — they now collapse into two: speechToText + llms.
 // Legacy deep-links land on the matching sub-tab via LEGACY_SUB_TAB.
+// "dictationAgent" (the Home GPU banner) and "noteFormatting" (a note action's
+// error toast) are live deep-links, not legacy aliases.
 const SECTION_ALIASES: Record<string, SettingsSectionType> = {
   aiModels: "llms",
   agentConfig: "llms",
   agentMode: "llms",
+  dictationAgent: "llms",
   intelligence: "llms",
   meetings: "llms",
+  noteFormatting: "llms",
   prompts: "llms",
   transcription: "speechToText",
   uploadTranscription: "speechToText",
@@ -39,7 +46,9 @@ const SECTION_ALIASES: Record<string, SettingsSectionType> = {
 const LEGACY_SUB_TAB: Record<string, string> = {
   transcription: "dictation",
   uploadTranscription: "upload",
+  dictationAgent: "dictationAgent",
   meetings: "noteFormatting",
+  noteFormatting: "noteFormatting",
   intelligence: "dictationCleanup",
   agentMode: "chatIntelligence",
   agentConfig: "chatIntelligence",
@@ -55,7 +64,8 @@ interface SettingsModalProps {
 
 export default function SettingsModal({ open, onOpenChange, initialSection }: SettingsModalProps) {
   const { t } = useTranslation();
-  const { isSignedIn } = useAuth();
+  const { isSignedIn, user } = useAuth();
+  const policyManaged = usePolicyStore((s) => s.managed);
   const sidebarItems: SidebarItem<SettingsSectionType>[] = useMemo(() => {
     const items: SidebarItem<SettingsSectionType>[] = [
       {
@@ -99,6 +109,13 @@ export default function SettingsModal({ open, onOpenChange, initialSection }: Se
         label: t("settingsModal.sections.hotkeys.label"),
         icon: Keyboard,
         description: t("settingsModal.sections.hotkeys.description"),
+        group: t("settingsModal.groups.app"),
+      },
+      {
+        id: "toneStyle",
+        label: t("settingsModal.sections.toneStyle.label"),
+        icon: SquareSparkle,
+        description: t("settingsModal.sections.toneStyle.description"),
         group: t("settingsModal.groups.app"),
       },
       {
@@ -155,9 +172,9 @@ export default function SettingsModal({ open, onOpenChange, initialSection }: Se
     if (!open) setInitialSubTab(undefined);
   }
 
-  const handleSectionChange = (section: SettingsSectionType) => {
+  const handleSectionChange = (section: SettingsSectionType, subTab?: string) => {
     setActiveSection(section);
-    setInitialSubTab(undefined);
+    setInitialSubTab(subTab);
   };
 
   return (
@@ -168,6 +185,30 @@ export default function SettingsModal({ open, onOpenChange, initialSection }: Se
       sidebarItems={sidebarItems}
       activeSection={activeSection}
       onSectionChange={handleSectionChange}
+      header={
+        isSignedIn && user ? (
+          <div className="flex flex-col items-center gap-2 pb-2 text-center">
+            <AccountAvatar image={user.image} name={user.name || t("settingsPage.account.user")} />
+            <div className="min-w-0 w-full">
+              <p dir="auto" className="text-[13px] font-semibold text-foreground truncate">
+                {user.name || t("settingsPage.account.user")}
+              </p>
+              <p className="text-xs text-muted-foreground truncate">
+                <bdi dir="ltr">{user.email}</bdi>
+              </p>
+            </div>
+          </div>
+        ) : undefined
+      }
+      notice={
+        policyManaged
+          ? {
+              icon: <ShieldCheck className="h-3.5 w-3.5 shrink-0" />,
+              label: t("settingsModal.managedAccount"),
+              description: t("settingsModal.managedByOrg"),
+            }
+          : undefined
+      }
     >
       <SettingsPage
         activeSection={activeSection}

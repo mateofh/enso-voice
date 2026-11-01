@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const modelManagerModulePath = require.resolve("../../src/helpers/modelManagerBridge.js");
+const modelDirUtilsModulePath = require.resolve("../../src/helpers/modelDirUtils.js");
 const originalLoad = Module._load;
 let electronHome = os.tmpdir();
 
@@ -14,6 +15,7 @@ const NON_QAT_ID = "gemma-4-e2b-it-q4_k_m";
 
 function loadModelManager() {
   delete require.cache[modelManagerModulePath];
+  delete require.cache[modelDirUtilsModulePath];
 
   Module._load = function loadWithMocks(request) {
     if (request === "electron") {
@@ -30,6 +32,11 @@ function loadModelManager() {
   };
 
   try {
+    // modelManagerBridge requires modelDirUtils lazily (inside getModelsDir),
+    // after this mock is uninstalled — load it now so its electron binding is
+    // the stub and modelsDir resolves inside the per-test temp home instead of
+    // the real ~/.cache/openwhispr (where deleteModel would touch real files).
+    require("../../src/helpers/modelDirUtils.js");
     return require("../../src/helpers/modelManagerBridge.js").default;
   } finally {
     Module._load = originalLoad;
@@ -116,6 +123,9 @@ test("deleteModel removes the drafter alongside the main file, ignoring a missin
   });
 });
 
+// Context size is the third restart trigger; it is covered in
+// test/helpers/llamaServerContext.test.js. Every start() here passes the same
+// (default) context, so this file isolates the model/drafter dimension.
 test("llama-server start restarts only when model or drafter presence changes", async () => {
   const LlamaServerManager = require("../../src/helpers/llamaServer.js");
   const manager = new LlamaServerManager();

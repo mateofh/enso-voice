@@ -1,9 +1,16 @@
 const debugLogger = require("./debugLogger");
+const { getMeetingJoinUrl } = require("./meetingJoinUrl");
 
 const MEETING_REMINDER_LEAD_MS = 60 * 1000;
 
 function notificationKey(event) {
   return `${event.provider || "google"}:${event.id}`;
+}
+
+// A solo event with no invitees and no meeting link is a time block (focus
+// time, a personal reminder), not a meeting — every provider syncs those.
+function isReminderEligible(event) {
+  return event.attendees_count > 0 || getMeetingJoinUrl(event);
 }
 
 // Provider-agnostic meeting reminder scheduling. Reads only the shared
@@ -19,13 +26,30 @@ class CalendarReminderScheduler {
   }
 
   scheduleNextMeeting() {
+    if (this.activeMeeting) {
+      this.reconcileProvider(this.activeMeeting.provider);
+    }
+    if (!this.activeMeeting) {
+      // A delivered meeting that became eligible again (re-accepted before or
+      // during the meeting) is active again, without a second reminder.
+      const delivered = this.databaseManager
+        .getUpcomingEvents(1)
+        .find((event) => this.notifiedMeetings.has(notificationKey(event)));
+      if (delivered) {
+        this.activeMeeting = delivered;
+        this._scheduleMeetingEnd(delivered);
+      }
+    }
+
     if (this.nextMeetingTimer) {
       clearTimeout(this.nextMeetingTimer);
       this.nextMeetingTimer = null;
     }
 
     const upcoming = this.databaseManager.getUpcomingEvents(1440);
-    const next = upcoming.find((e) => !this.notifiedMeetings.has(notificationKey(e)));
+    const next = upcoming.find(
+      (event) => isReminderEligible(event) && !this.notifiedMeetings.has(notificationKey(event))
+    );
     if (!next) return;
 
     const delay = new Date(next.start_time).getTime() - MEETING_REMINDER_LEAD_MS - Date.now();
@@ -40,6 +64,11 @@ class CalendarReminderScheduler {
   }
 
   onMeetingStart(event) {
+    if (!isReminderEligible(event)) {
+      this.scheduleNextMeeting();
+      return;
+    }
+
     const events = this.databaseManager.getActiveEvents();
     const stillExists =
       events.some((e) => notificationKey(e) === notificationKey(event)) ||
@@ -90,9 +119,9 @@ class CalendarReminderScheduler {
     };
   }
 
-  // Refresh or clear the cached active event after a provider replaces its
-  // rows. Keep notifiedMeetings intact so periodic snapshots cannot re-fire a
-  // reminder that was already delivered.
+  // Refresh or clear the cached active event on every schedule refresh. Keep
+  // notifiedMeetings intact so periodic snapshots cannot re-fire a reminder
+  // that was already delivered.
   reconcileProvider(provider) {
     if (!this.activeMeeting || this.activeMeeting.provider !== provider) return;
 
@@ -161,6 +190,8 @@ class CalendarReminderScheduler {
     for (const key of this.notifiedMeetings) {
       if (key.startsWith(prefix)) this.notifiedMeetings.delete(key);
     }
+
+    this.scheduleNextMeeting();
   }
 }
 

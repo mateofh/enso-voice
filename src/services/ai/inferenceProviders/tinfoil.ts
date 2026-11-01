@@ -2,11 +2,19 @@ import type { InferenceProvider } from "./types";
 import { TOKEN_LIMITS } from "../../../config/constants";
 import { withRetry, createApiRetryStrategy } from "../../../utils/retry";
 import logger from "../../../utils/logger";
-import { applyThinkingSuppression } from "../thinkingSuppression";
+import {
+  applyChatCompletionsParams,
+  emptyResponseError,
+  isTruncatedFinishReason,
+  truncatedOutputError,
+} from "../chatRequestBody";
 import { getTinfoilChatClient } from "../tinfoilClient";
+import { isRequestCancelled, requestCancelledError, requestSignal } from "../requestCancellation";
+import {
+  getLlmRequestTimeoutSeconds,
+  llmRequestTimeoutError,
+} from "../../../helpers/llmRequestTimeout.js";
 import { wrapCleanupTranscript } from "../../../config/prompts";
-
-const REQUEST_TIMEOUT_MS = 30_000;
 
 export const tinfoilProvider: InferenceProvider = {
   id: "tinfoil",
@@ -18,7 +26,7 @@ export const tinfoilProvider: InferenceProvider = {
     // refuses to send anything over an unverified transport.
     const client = await getTinfoilChatClient(apiKey);
 
-    const systemPrompt = config.systemPrompt || ctx.getSystemPrompt(agentName);
+    const systemPrompt = config.systemPrompt || ctx.getSystemPrompt(agentName, config.toneStyle);
     const userContent = config.systemPrompt ? text : wrapCleanupTranscript(text);
     const messages = [
       { role: "system", content: systemPrompt },
@@ -37,31 +45,42 @@ export const tinfoilProvider: InferenceProvider = {
         )
       );
 
-    const requestBody: Record<string, unknown> = {
-      model,
-      messages,
-      max_tokens: maxTokens,
-      temperature: config.temperature ?? (config.systemPrompt ? 0.3 : 0),
-    };
+    const requestBody: Record<string, unknown> = { model, messages };
+    applyChatCompletionsParams(requestBody, { model, provider: "tinfoil", config, maxTokens });
 
-    applyThinkingSuppression(requestBody, model, "tinfoil", config);
-
-    // 30s per attempt like sibling providers; SDK-internal retries off so
-    // withRetry stays the single retry layer.
-    const response = await withRetry(
-      () =>
-        client.chat.completions.create(requestBody as any, {
-          timeout: REQUEST_TIMEOUT_MS,
+    // Keep SDK-internal retries off so withRetry stays the single retry layer.
+    const timeoutSeconds = getLlmRequestTimeoutSeconds({ scope: config.inferenceScope });
+    const response = await withRetry(async () => {
+      try {
+        return await client.chat.completions.create(requestBody as any, {
+          timeout: timeoutSeconds * 1000,
           maxRetries: 0,
-        }),
-      createApiRetryStrategy()
-    );
+          signal: requestSignal(config.requestId),
+        });
+      } catch (error) {
+        // The SDK's abort error has no status, which withRetry would re-send.
+        if (isRequestCancelled(config.requestId)) throw requestCancelledError();
+        // The SDK reports an expired deadline as a connection error, which
+        // withRetry would otherwise treat as a network drop and re-send.
+        if ((error as Error).name === "APIConnectionTimeoutError") {
+          throw llmRequestTimeoutError(timeoutSeconds);
+        }
+        throw error;
+      }
+    }, createApiRetryStrategy());
 
     const responseText =
       response.choices
         ?.map((choice: any) => choice?.message?.content)
         .find((content: unknown) => typeof content === "string" && content.trim())
         ?.trim() || "";
+
+    const responseIncomplete = response.choices?.some((choice: any) =>
+      isTruncatedFinishReason(choice?.finish_reason)
+    );
+    if (config.requireCompleteOutput && responseIncomplete) {
+      throw truncatedOutputError();
+    }
 
     logger.logReasoning("TINFOIL_RESPONSE", {
       model,
@@ -72,6 +91,8 @@ export const tinfoilProvider: InferenceProvider = {
     });
 
     if (!responseText) {
+      const error = emptyResponseError("Tinfoil", config, !!responseIncomplete);
+      if (error) throw error;
       logger.logReasoning("TINFOIL_EMPTY_RESPONSE_FALLBACK", {
         model,
         originalTextLength: text.length,

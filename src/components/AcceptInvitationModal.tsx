@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2 } from "lucide-react";
+import { Loader2 } from "./icons";
 import {
   Dialog,
   DialogContent,
@@ -15,25 +15,26 @@ import {
   storePendingInvitationToken,
   clearPendingInvitationToken,
 } from "../utils/pendingInvitationToken";
-import { useWorkspaceStore } from "../stores/workspaceStore";
 import { useAuth } from "../hooks/useAuth";
 import { signOut } from "../lib/auth";
 import { syncService } from "../services/SyncService.js";
+import { stopRecording } from "../stores/meetingRecordingStore";
+import { afterWorkspaceJoined } from "../services/membershipActions";
 import { useToast } from "./ui/useToast";
 import SignInDialog from "./SignInDialog";
+import { formatList } from "../lib/formatList";
 import type { InvitationPreview } from "../types/electron";
 
 interface Props {
   token: string | null;
   onClose: () => void;
-  onAccepted?: (entry: { workspaceId: string; teamIds: string[] }) => void;
+  onAccepted?: (entry: { workspaceId: string; teamIds: string[]; spaceIds: string[] }) => void;
 }
 
 export default function AcceptInvitationModal({ token, onClose, onAccepted }: Props) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { toast } = useToast();
   const { isSignedIn, user } = useAuth();
-  const refresh = useWorkspaceStore((s) => s.refresh);
   const [preview, setPreview] = useState<InvitationPreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [accepting, setAccepting] = useState(false);
@@ -81,14 +82,7 @@ export default function AcceptInvitationModal({ token, onClose, onAccepted }: Pr
     try {
       const accepted = await InvitationsService.accept(token);
       clearPendingInvitationToken();
-      await refresh();
-      // A free invitee just gained a billable seat server-side; refetch usage
-      // so the isSubscribed flag flips and team sync can run (the flag flip
-      // itself kicks another sync pass).
-      window.dispatchEvent(new Event("usage-changed"));
-      // Pull the just-granted team spaces right away (skeleton rows render
-      // while their backfill is pending).
-      syncService.requestSyncAll("manual");
+      await afterWorkspaceJoined();
       toast({
         title: t("workspaces.accept.successTitle"),
         description: preview
@@ -98,11 +92,12 @@ export default function AcceptInvitationModal({ token, onClose, onAccepted }: Pr
       onClose();
       // Navigate with the accept response, not the preview: the invitation
       // may have been re-targeted since it was previewed, and the server's
-      // team_ids are authoritative. The preview only fills in for API
-      // responses that predate team_ids.
+      // team_ids/space_ids are authoritative. The preview only fills in for
+      // API responses that predate team_ids.
       onAccepted?.({
         workspaceId: accepted.workspace_id,
         teamIds: accepted.team_ids ?? preview?.team_ids ?? [],
+        spaceIds: accepted.space_ids ?? [],
       });
     } catch (err) {
       toast({
@@ -125,6 +120,8 @@ export default function AcceptInvitationModal({ token, onClose, onAccepted }: Pr
   // new one (the purge never blocks the switch).
   async function handleSwitchAccount() {
     if (token) storePendingInvitationToken(token);
+    // Signing out takes a live meeting's note out of scope; end it first.
+    await stopRecording();
     await syncService.purgeTeamSpacesForSignOut();
     await signOut();
   }
@@ -144,11 +141,19 @@ export default function AcceptInvitationModal({ token, onClose, onAccepted }: Pr
                     role: t(`settingsPage.workspace.role.${preview.workspace_role}`),
                   })}
                 </DialogDescription>
-                {(preview.team_ids?.length ?? 0) > 0 && (
-                  // The preview endpoint returns team ids only, so show a count.
+                {(preview.space_names?.length ?? 0) > 0 ? (
                   <DialogDescription className="text-xs text-muted-foreground/80 mt-1">
-                    {t("notes.spaces.invitedTo", { count: preview.team_ids.length })}
+                    {t("notes.spaces.invitedToSpaces", {
+                      spaces: formatList(i18n.language, preview.space_names ?? []),
+                    })}
                   </DialogDescription>
+                ) : (
+                  (preview.team_ids?.length ?? 0) > 0 && (
+                    // Group grants arrive as ids only, so show a count.
+                    <DialogDescription className="text-xs text-muted-foreground/80 mt-1">
+                      {t("notes.spaces.invitedTo", { count: preview.team_ids.length })}
+                    </DialogDescription>
+                  )
                 )}
                 {wrongAccount ? (
                   <DialogDescription className="text-xs text-destructive mt-1">
