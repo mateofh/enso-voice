@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
+import { useUiLocale } from "../hooks/useUiLocale";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   Search,
@@ -11,8 +12,10 @@ import {
   Upload,
   MessageSquare,
   ChevronDown,
-} from "lucide-react";
+} from "./icons";
 import { cn } from "./lib/utils";
+import { useDismissGuard } from "./ui/useDismissGuard";
+import { blurBehindOverlays } from "./ui/overlayBlur";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -22,6 +25,10 @@ import {
 } from "./ui/dropdown-menu";
 import type { NoteItem, FolderItem, SpaceItem, TranscriptionItem } from "../types/electron.js";
 import { formatRelativeTime } from "../utils/dateFormatting";
+import { parseTranscriptSegments } from "../utils/parseTranscriptSegments";
+import { defaultFolderDisplayName, folderMatchesQuery } from "./notes/shared";
+import { useWorkspace } from "../hooks/useWorkspace";
+import { spacesInWorkspaceScope } from "../lib/workspaceSelection";
 
 interface ConversationResult {
   id: number;
@@ -56,12 +63,17 @@ type FlatItem =
   | { kind: "conversation"; conversation: ConversationResult };
 
 function stripMarkdownPreview(text: string): string {
-  return text
-    .replace(/#{1,6}\s+/g, "")
-    .replace(/[*_~`]+/g, "")
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/\n+/g, " ")
-    .trim();
+  return (
+    text
+      .replace(/#{1,6}\s+/g, "")
+      .replace(/[*_~`]+/g, "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      // Table delimiter rows, then the pipes between cells.
+      .replace(/^[ \t|:-]+$/gm, "")
+      .replace(/\\?\|/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
 }
 
 export default function CommandSearch({
@@ -75,11 +87,13 @@ export default function CommandSearch({
   onConversationSelect,
 }: CommandSearchProps) {
   const { t } = useTranslation();
+  const locale = useUiLocale();
   const [query, setQuery] = useState("");
   const [notes, setNotes] = useState<NoteItem[]>([]);
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [spaces, setSpaces] = useState<SpaceItem[]>([]);
   const [scopeSpaceId, setScopeSpaceId] = useState<number | null>(null);
+  const { workspaces, active: activeWorkspace } = useWorkspace();
   const [conversations, setConversations] = useState<ConversationResult[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -91,8 +105,10 @@ export default function CommandSearch({
   const [prevNotes, setPrevNotes] = useState(notes);
   const [prevQuery, setPrevQuery] = useState(query);
 
+  // Read on every open: a space created since would otherwise be missing from
+  // the workspace's list, and its notes filtered out with the hidden ones.
   useEffect(() => {
-    if (isConversationsMode) return;
+    if (!open || isConversationsMode) return;
     window.electronAPI
       .getFolders()
       .then(setFolders)
@@ -101,7 +117,18 @@ export default function CommandSearch({
       .getSpaces?.()
       .then((items) => setSpaces(items ?? []))
       .catch(() => {});
-  }, [isConversationsMode]);
+  }, [open, isConversationsMode]);
+
+  // Other workspaces' spaces and notes stay out of search, as in the tree.
+  const visibleSpaces = useMemo(
+    () => spacesInWorkspaceScope(spaces, activeWorkspace?.id ?? null, workspaces),
+    [spaces, activeWorkspace?.id, workspaces]
+  );
+  // null when nothing is hidden, so the queries stay unscoped.
+  const visibleSpaceIds = useMemo(
+    () => (visibleSpaces.length === spaces.length ? null : visibleSpaces.map((s) => s.id)),
+    [visibleSpaces, spaces.length]
+  );
 
   if (open && !prevOpen) {
     setPrevOpen(open);
@@ -128,11 +155,11 @@ export default function CommandSearch({
       });
     } else {
       window.electronAPI
-        .getNotes()
+        .getNotes(null, undefined, null, null, visibleSpaceIds)
         .then(setNotes)
         .catch(() => {});
     }
-  }, [open, isConversationsMode]);
+  }, [open, isConversationsMode, visibleSpaceIds]);
 
   useEffect(() => {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
@@ -174,14 +201,20 @@ export default function CommandSearch({
     } else {
       if (!query.trim()) {
         window.electronAPI
-          .getNotes()
+          .getNotes(null, undefined, null, null, visibleSpaceIds)
           .then(setNotes)
           .catch(() => {});
         return;
       }
       searchTimerRef.current = setTimeout(async () => {
         try {
-          const results = await window.electronAPI.searchNotes(query, undefined, scopeSpaceId);
+          const results = await window.electronAPI.searchNotes(
+            query,
+            undefined,
+            scopeSpaceId,
+            null,
+            visibleSpaceIds
+          );
           setNotes(results);
         } catch {
           /* keep current */
@@ -192,7 +225,7 @@ export default function CommandSearch({
     return () => {
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     };
-  }, [query, isConversationsMode, scopeSpaceId]);
+  }, [query, isConversationsMode, scopeSpaceId, visibleSpaceIds]);
 
   if (notes !== prevNotes || query !== prevQuery) {
     setPrevNotes(notes);
@@ -212,11 +245,13 @@ export default function CommandSearch({
   }, []);
 
   // The search leg scopes at the DB; this also covers browsed (empty-query)
-  // results and stale in-flight results after a scope switch.
-  const scopedNotes = useMemo(
-    () => (scopeSpaceId == null ? notes : notes.filter((n) => n.space_id === scopeSpaceId)),
-    [notes, scopeSpaceId]
-  );
+  // results and stale in-flight results after a scope or workspace switch.
+  const scopedNotes = useMemo(() => {
+    if (scopeSpaceId != null) return notes.filter((n) => n.space_id === scopeSpaceId);
+    if (!visibleSpaceIds) return notes;
+    const visible = new Set(visibleSpaceIds);
+    return notes.filter((n) => visible.has(n.space_id));
+  }, [notes, scopeSpaceId, visibleSpaceIds]);
 
   const spaceLabel = useCallback(
     (space: SpaceItem) =>
@@ -230,35 +265,37 @@ export default function CommandSearch({
     (note: NoteItem) => {
       const space = spaceMap.get(note.space_id);
       const folder = note.folder_id != null ? folderMap.get(note.folder_id) : undefined;
-      if (!space) return folder?.name ?? "";
-      return folder ? `${spaceLabel(space)} / ${folder.name}` : spaceLabel(space);
+      const folderLabel = folder ? defaultFolderDisplayName(folder, t) : "";
+      if (!space) return folderLabel;
+      return folder ? `${spaceLabel(space)} / ${folderLabel}` : spaceLabel(space);
     },
-    [spaceMap, folderMap, spaceLabel]
+    [spaceMap, folderMap, spaceLabel, t]
   );
 
   const jumpTargets = useMemo<JumpTarget[]>(() => {
     const q = query.trim().toLowerCase();
     if (!q || isConversationsMode) return [];
     const targets: JumpTarget[] = [];
-    for (const space of spaces) {
+    const visibleIds = new Set(visibleSpaces.map((space) => space.id));
+    for (const space of visibleSpaces) {
       const label = spaceLabel(space);
       if (label.toLowerCase().includes(q)) {
         targets.push({ key: `s:${space.id}`, spaceId: space.id, folderId: null, label, space });
       }
     }
     for (const folder of folders) {
-      if (folder.name.toLowerCase().includes(q)) {
+      if (visibleIds.has(folder.space_id) && folderMatchesQuery(folder, t, q)) {
         targets.push({
           key: `f:${folder.id}`,
           spaceId: folder.space_id,
           folderId: folder.id,
-          label: folder.name,
+          label: defaultFolderDisplayName(folder, t),
           space: spaceMap.get(folder.space_id),
         });
       }
     }
     return targets.slice(0, 5);
-  }, [query, spaces, folders, spaceMap, spaceLabel, isConversationsMode]);
+  }, [query, visibleSpaces, folders, spaceMap, spaceLabel, isConversationsMode, t]);
 
   const filteredTranscripts = useMemo(() => {
     const slice = query.trim()
@@ -313,15 +350,27 @@ export default function CommandSearch({
   }, [selectedIndex]);
 
   const hasResults = flatItems.length > 0;
+  const { registerContent, shouldBlockDismiss } = useDismissGuard<HTMLDivElement>();
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <DialogPrimitive.Overlay
+          className={cn(
+            "fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+            blurBehindOverlays && "backdrop-blur-sm"
+          )}
+        />
         <DialogPrimitive.Content
+          ref={registerContent}
+          onInteractOutside={(e) => {
+            // The filter dropdown makes this panel inert while it is open, so
+            // the click that closes it lands on the overlay — see useDismissGuard.
+            if (shouldBlockDismiss(e)) e.preventDefault();
+          }}
           className={cn(
             "fixed left-[50%] top-[18%] z-50 w-full max-w-xl translate-x-[-50%]",
-            "rounded-xl border border-border/60 bg-card shadow-2xl overflow-hidden",
+            "rounded-xl border border-border/70 bg-card shadow-2xl overflow-hidden",
             "dark:bg-surface-2 dark:border-border dark:shadow-modal",
             "data-[state=open]:animate-in data-[state=closed]:animate-out",
             "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
@@ -338,23 +387,27 @@ export default function CommandSearch({
           </DialogPrimitive.Description>
 
           {/* Search input */}
-          <div className="flex items-center gap-2.5 px-3.5 py-3 border-b border-border/40">
-            <Search size={14} className="shrink-0 text-muted-foreground/50" />
-            {!isConversationsMode && spaces.length > 1 && (
+          <div className="flex items-center gap-2.5 px-3.5 py-3 border-b border-border/70">
+            <Search size={14} className="shrink-0 text-muted-foreground/70" />
+            {!isConversationsMode && visibleSpaces.length > 1 && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
                     className={cn(
-                      "flex items-center gap-1 shrink-0 rounded-md border border-border/50 bg-muted/40",
+                      "flex items-center gap-1 shrink-0 rounded-md border border-border/70 bg-muted/40",
                       "px-1.5 py-0.5 text-[11px] transition-colors outline-none",
                       scopeSpace ? "text-foreground" : "text-muted-foreground hover:text-foreground"
                     )}
                   >
                     <span className="truncate max-w-32">
-                      {scopeSpace ? spaceLabel(scopeSpace) : t("commandSearch.allSpaces")}
+                      {scopeSpace ? (
+                        <span dir="auto">{spaceLabel(scopeSpace)}</span>
+                      ) : (
+                        t("commandSearch.allSpaces")
+                      )}
                     </span>
-                    <ChevronDown size={11} className="shrink-0 text-muted-foreground/50" />
+                    <ChevronDown size={11} className="shrink-0 text-muted-foreground/70" />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent
@@ -368,22 +421,23 @@ export default function CommandSearch({
                     {t("commandSearch.allSpaces")}
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  {spaces.map((space) => (
+                  {visibleSpaces.map((space) => (
                     <DropdownMenuItem key={space.id} onSelect={() => selectScope(space.id)}>
-                      {spaceLabel(space)}
+                      <span dir="auto">{spaceLabel(space)}</span>
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuContent>
               </DropdownMenu>
             )}
             <input
+              dir="auto"
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={isConversationsMode ? t("chat.search") : t("commandSearch.placeholder")}
               autoFocus
-              className="flex-1 text-sm text-foreground placeholder:text-muted-foreground/40"
+              className="flex-1 text-sm text-foreground placeholder:text-muted-foreground/70"
               style={{
                 background: "transparent",
                 border: "none",
@@ -395,7 +449,7 @@ export default function CommandSearch({
             {query && (
               <button
                 onClick={() => setQuery("")}
-                className="text-[11px] text-muted-foreground/40 hover:text-muted-foreground transition-colors outline-none"
+                className="text-[11px] text-muted-foreground/70 hover:text-muted-foreground transition-colors outline-none"
               >
                 ✕
               </button>
@@ -406,7 +460,7 @@ export default function CommandSearch({
           <div ref={listRef} className="overflow-y-auto max-h-[340px] p-1.5">
             {!hasResults ? (
               <div className="flex items-center justify-center py-10">
-                <p className="text-xs text-muted-foreground/50">
+                <p className="text-xs text-muted-foreground/70">
                   {query.trim()
                     ? t("commandSearch.noResults")
                     : isConversationsMode
@@ -423,7 +477,7 @@ export default function CommandSearch({
                   onClick={() => selectItem({ kind: "conversation", conversation: conv })}
                   onMouseEnter={() => setSelectedIndex(idx)}
                   className={cn(
-                    "flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-left transition-colors duration-100 outline-none",
+                    "flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-start transition-colors duration-100 outline-none",
                     selectedIndex === idx
                       ? "bg-primary/8 dark:bg-primary/10"
                       : "hover:bg-foreground/4 dark:hover:bg-white/4"
@@ -433,19 +487,21 @@ export default function CommandSearch({
                     size={13}
                     className={cn(
                       "shrink-0 mt-px transition-colors",
-                      selectedIndex === idx ? "text-primary" : "text-muted-foreground/40"
+                      selectedIndex === idx ? "text-primary" : "text-muted-foreground/70"
                     )}
                   />
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-foreground truncate">{conv.title}</p>
+                    <p dir="auto" className="text-xs font-medium text-foreground truncate">
+                      {conv.title}
+                    </p>
                     {conv.last_message && (
-                      <p className="text-[11px] text-muted-foreground/55 truncate mt-px">
+                      <p dir="auto" className="text-[11px] text-muted-foreground/55 truncate mt-px">
                         {conv.last_message.slice(0, 90)}
                       </p>
                     )}
                   </div>
-                  <span className="text-[10px] text-muted-foreground/35 tabular-nums shrink-0">
-                    {formatRelativeTime(conv.updated_at, t)}
+                  <span className="text-[10px] text-muted-foreground/70 tabular-nums shrink-0">
+                    {formatRelativeTime(conv.updated_at, t, locale)}
                   </span>
                 </button>
               ))
@@ -465,7 +521,7 @@ export default function CommandSearch({
                         <ContainerRow
                           key={target.key}
                           target={target}
-                          showSpaceHint={target.folderId != null && spaces.length > 1}
+                          showSpaceHint={target.folderId != null && visibleSpaces.length > 1}
                           spaceLabel={spaceLabel}
                           idx={idx}
                           isSelected={selectedIndex === idx}
@@ -497,6 +553,7 @@ export default function CommandSearch({
                           onSelect={() => selectItem({ kind: "note", note })}
                           onHover={() => setSelectedIndex(idx)}
                           t={t}
+                          locale={locale}
                         />
                       );
                     })}
@@ -522,6 +579,7 @@ export default function CommandSearch({
                           onSelect={() => selectItem({ kind: "transcript", transcript })}
                           onHover={() => setSelectedIndex(idx)}
                           t={t}
+                          locale={locale}
                         />
                       );
                     })}
@@ -532,7 +590,7 @@ export default function CommandSearch({
           </div>
 
           {/* Footer */}
-          <div className="flex items-center gap-4 px-3.5 py-2 border-t border-border/30 bg-muted/15">
+          <div className="flex items-center gap-4 px-3.5 py-2 border-t border-border/70 bg-muted/15">
             <FooterHint keys={["↑", "↓"]} label={t("commandSearch.footer.navigate")} />
             <FooterHint keys={["↵"]} label={t("commandSearch.footer.open")} />
             <FooterHint keys={["Esc"]} label={t("commandSearch.footer.dismiss")} />
@@ -546,8 +604,8 @@ export default function CommandSearch({
 function SectionHeader({ icon, label }: { icon: React.ReactNode; label: string }) {
   return (
     <div className="flex items-center gap-1.5 px-2.5 pt-2 pb-1">
-      <span className="text-muted-foreground/45">{icon}</span>
-      <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/50">
+      <span className="text-muted-foreground/70">{icon}</span>
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
         {label}
       </span>
     </div>
@@ -574,7 +632,7 @@ function ContainerRow({
   const { space } = target;
   const iconClass = cn(
     "shrink-0 transition-colors",
-    isSelected ? "text-primary" : "text-muted-foreground/40"
+    isSelected ? "text-primary" : "text-muted-foreground/70"
   );
   return (
     <button
@@ -583,7 +641,7 @@ function ContainerRow({
       onClick={onSelect}
       onMouseEnter={onHover}
       className={cn(
-        "group flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-left transition-colors duration-100 outline-none",
+        "group flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-start transition-colors duration-100 outline-none",
         isSelected
           ? "bg-primary/8 dark:bg-primary/10"
           : "hover:bg-foreground/4 dark:hover:bg-white/4"
@@ -600,9 +658,14 @@ function ContainerRow({
       ) : (
         <Users size={13} className={iconClass} />
       )}
-      <p className="flex-1 text-xs font-medium text-foreground truncate min-w-0">{target.label}</p>
+      <p dir="auto" className="flex-1 text-xs font-medium text-foreground truncate min-w-0">
+        {target.label}
+      </p>
       {showSpaceHint && space && (
-        <span className="text-[10px] text-muted-foreground/45 truncate shrink-0 max-w-32">
+        <span
+          dir="auto"
+          className="text-[10px] text-muted-foreground/70 truncate shrink-0 max-w-32"
+        >
           {spaceLabel(space)}
         </span>
       )}
@@ -618,6 +681,7 @@ function NoteRow({
   onSelect,
   onHover,
   t,
+  locale,
 }: {
   note: NoteItem;
   breadcrumb: string;
@@ -626,8 +690,18 @@ function NoteRow({
   onSelect: () => void;
   onHover: () => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
+  locale?: string;
 }) {
-  const preview = stripMarkdownPreview(note.content).slice(0, 90);
+  // An upload's transcription lives in its transcript, so one without notes previews that.
+  const preview = useMemo(() => {
+    const transcriptOnly = note.note_type === "upload" && !note.content.trim();
+    const text = transcriptOnly
+      ? parseTranscriptSegments(note.transcript || "")
+          .map((segment) => segment.text)
+          .join(" ")
+      : note.content;
+    return stripMarkdownPreview(text).slice(0, 90);
+  }, [note.content, note.note_type, note.transcript]);
   const NoteIcon =
     note.note_type === "meeting" ? Users : note.note_type === "upload" ? Upload : FileText;
   return (
@@ -637,7 +711,7 @@ function NoteRow({
       onClick={onSelect}
       onMouseEnter={onHover}
       className={cn(
-        "group flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-left transition-colors duration-100 outline-none",
+        "group flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-start transition-colors duration-100 outline-none",
         isSelected
           ? "bg-primary/8 dark:bg-primary/10"
           : "hover:bg-foreground/4 dark:hover:bg-white/4"
@@ -647,28 +721,37 @@ function NoteRow({
         size={13}
         className={cn(
           "shrink-0 mt-px transition-colors",
-          isSelected ? "text-primary" : "text-muted-foreground/40"
+          isSelected ? "text-primary" : "text-muted-foreground/70"
         )}
       />
       <div className="flex-1 min-w-0">
         <p
+          dir="auto"
           className={cn(
             "text-xs font-medium truncate",
-            note.title ? "text-foreground" : "italic text-muted-foreground/50"
+            note.title ? "text-foreground" : "italic text-muted-foreground/70"
           )}
         >
           {note.title || t("notes.list.untitled")}
         </p>
         {(breadcrumb || preview) && (
           <p className="text-[10px] truncate mt-px">
-            {breadcrumb && <span className="text-muted-foreground/45">{breadcrumb}</span>}
-            {breadcrumb && preview && <span className="text-muted-foreground/35"> · </span>}
-            {preview && <span className="text-muted-foreground/55">{preview}</span>}
+            {breadcrumb && (
+              <span dir="auto" className="text-muted-foreground/70">
+                {breadcrumb}
+              </span>
+            )}
+            {breadcrumb && preview && <span className="text-muted-foreground/70"> · </span>}
+            {preview && (
+              <span dir="auto" className="text-muted-foreground/55">
+                {preview}
+              </span>
+            )}
           </p>
         )}
       </div>
-      <span className="text-[10px] text-muted-foreground/35 tabular-nums shrink-0">
-        {formatRelativeTime(note.updated_at, t)}
+      <span className="text-[10px] text-muted-foreground/70 tabular-nums shrink-0">
+        {formatRelativeTime(note.updated_at, t, locale)}
       </span>
     </button>
   );
@@ -681,6 +764,7 @@ function TranscriptRow({
   onSelect,
   onHover,
   t,
+  locale,
 }: {
   transcript: TranscriptionItem;
   idx: number;
@@ -688,6 +772,7 @@ function TranscriptRow({
   onSelect: () => void;
   onHover: () => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
+  locale?: string;
 }) {
   return (
     <button
@@ -696,7 +781,7 @@ function TranscriptRow({
       onClick={onSelect}
       onMouseEnter={onHover}
       className={cn(
-        "group flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-left transition-colors duration-100 outline-none",
+        "group flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-start transition-colors duration-100 outline-none",
         isSelected
           ? "bg-primary/8 dark:bg-primary/10"
           : "hover:bg-foreground/4 dark:hover:bg-white/4"
@@ -706,12 +791,14 @@ function TranscriptRow({
         size={13}
         className={cn(
           "shrink-0 mt-px transition-colors",
-          isSelected ? "text-primary" : "text-muted-foreground/40"
+          isSelected ? "text-primary" : "text-muted-foreground/70"
         )}
       />
-      <p className="flex-1 text-xs text-foreground/75 truncate min-w-0">{transcript.text}</p>
-      <span className="text-[10px] text-muted-foreground/35 tabular-nums shrink-0">
-        {formatRelativeTime(transcript.created_at, t)}
+      <p dir="auto" className="flex-1 text-xs text-foreground/75 truncate min-w-0">
+        {transcript.text}
+      </p>
+      <span className="text-[10px] text-muted-foreground/70 tabular-nums shrink-0">
+        {formatRelativeTime(transcript.created_at, t, locale)}
       </span>
     </button>
   );
@@ -720,15 +807,17 @@ function TranscriptRow({
 function FooterHint({ keys, label }: { keys: string[]; label: string }) {
   return (
     <div className="flex items-center gap-1">
-      {keys.map((k) => (
-        <kbd
-          key={k}
-          className="text-[10px] px-1 py-px rounded border border-border/40 bg-muted/50 text-muted-foreground/55 font-mono leading-tight"
-        >
-          {k}
-        </kbd>
-      ))}
-      <span className="text-[10px] text-muted-foreground/40 ml-0.5">{label}</span>
+      <span dir="ltr" className="inline-flex items-center gap-1">
+        {keys.map((k) => (
+          <kbd
+            key={k}
+            className="text-[10px] px-1 py-px rounded border border-border/70 bg-muted/50 text-muted-foreground/55 font-mono leading-tight"
+          >
+            {k}
+          </kbd>
+        ))}
+      </span>
+      <span className="text-[10px] text-muted-foreground/70 ms-0.5">{label}</span>
     </div>
   );
 }

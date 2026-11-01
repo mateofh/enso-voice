@@ -1,5 +1,10 @@
 import { cloudGet, cloudPost, cloudPatch, cloudDelete, type DataWrap } from "./cloudApi.js";
-import type { Workspace, WorkspaceMember } from "../types/electron";
+import type {
+  JoinableWorkspace,
+  Workspace,
+  WorkspaceJoinRequest,
+  WorkspaceMember,
+} from "../types/electron";
 
 export interface SeatPreview {
   next_quantity: number;
@@ -7,6 +12,18 @@ export interface SeatPreview {
   seats_used: number;
   amount_due: number;
   currency: string;
+}
+
+export interface EnterpriseUpgradePreview {
+  // Prorated difference in cents, collected on the next invoice (Stripe
+  // create_prorations), not charged at confirmation time.
+  prorated_amount: number;
+  currency: string;
+  current_price_amount: number | null;
+  new_price_amount: number | null;
+  interval: "monthly" | "annual";
+  quantity: number;
+  next_billing_date: string | null;
 }
 
 async function list(): Promise<Workspace[]> {
@@ -19,10 +36,7 @@ async function create(name: string): Promise<Workspace> {
   return res.data;
 }
 
-async function update(
-  workspaceId: string,
-  patch: { name?: string; slug?: string }
-): Promise<Workspace> {
+async function update(workspaceId: string, patch: { name?: string }): Promise<Workspace> {
   const res = await cloudPatch<DataWrap<Workspace>>(`/api/workspaces/${workspaceId}`, patch);
   return res.data;
 }
@@ -51,11 +65,15 @@ async function removeMember(workspaceId: string, userId: string): Promise<void> 
 async function billingCheckout(
   workspaceId: string,
   interval: "monthly" | "annual" = "monthly",
-  additionalSeats = 0
+  options?: { tier?: "business" | "enterprise"; additionalSeats?: number }
 ): Promise<string> {
   const res = await cloudPost<DataWrap<{ url: string }>>(
     `/api/workspaces/${workspaceId}/billing/checkout`,
-    { interval, additional_seats: additionalSeats }
+    {
+      interval,
+      ...(options?.tier ? { tier: options.tier } : {}),
+      ...(options?.additionalSeats ? { additional_seats: options.additionalSeats } : {}),
+    }
   );
   return res.data.url;
 }
@@ -77,6 +95,17 @@ async function previewSeats(workspaceId: string, additionalSeats: number): Promi
   return res.data;
 }
 
+async function previewEnterpriseUpgrade(workspaceId: string): Promise<EnterpriseUpgradePreview> {
+  const res = await cloudPost<DataWrap<EnterpriseUpgradePreview>>(
+    `/api/workspaces/${workspaceId}/billing/preview-upgrade`
+  );
+  return res.data;
+}
+
+async function upgradeToEnterprise(workspaceId: string): Promise<void> {
+  await cloudPost<DataWrap<{ plan: string }>>(`/api/workspaces/${workspaceId}/billing/upgrade`);
+}
+
 async function updateSeats(
   workspaceId: string,
   quantity: number
@@ -88,7 +117,46 @@ async function updateSeats(
   return res.data;
 }
 
+/** Invitations the caller can accept and company-domain workspaces they can ask to join. */
+async function listJoinable(): Promise<JoinableWorkspace[]> {
+  const res = await cloudGet<DataWrap<JoinableWorkspace[]>>("/api/me/joinable");
+  return res.data;
+}
+
+async function join(workspaceId: string): Promise<{ workspace_id: string; role: string }> {
+  const res = await cloudPost<DataWrap<{ workspace_id: string; role: string }>>(
+    "/api/me/joinable",
+    { workspace_id: workspaceId }
+  );
+  return res.data;
+}
+
+/** Ask a workspace's admins for access. Grants nothing until one approves. */
+async function requestJoin(workspaceId: string): Promise<void> {
+  await cloudPost("/api/me/joinable/request", { workspace_id: workspaceId });
+}
+
+async function listJoinRequests(workspaceId: string): Promise<WorkspaceJoinRequest[]> {
+  const res = await cloudGet<DataWrap<WorkspaceJoinRequest[]>>(
+    `/api/workspaces/${workspaceId}/join-requests`
+  );
+  return res.data;
+}
+
+async function decideJoinRequest(
+  workspaceId: string,
+  requestId: string,
+  decision: "approve" | "deny"
+): Promise<void> {
+  await cloudPatch(`/api/workspaces/${workspaceId}/join-requests/${requestId}`, { decision });
+}
+
 export const WorkspacesService = {
+  listJoinable,
+  join,
+  requestJoin,
+  listJoinRequests,
+  decideJoinRequest,
   list,
   create,
   update,
@@ -99,5 +167,7 @@ export const WorkspacesService = {
   billingCheckout,
   billingPortal,
   previewSeats,
+  previewEnterpriseUpgrade,
+  upgradeToEnterprise,
   updateSeats,
 };

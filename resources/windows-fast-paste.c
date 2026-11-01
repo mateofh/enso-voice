@@ -10,6 +10,13 @@
  *   1. Window class name (fast, works for native terminals)
  *   2. Executable name (fallback, catches Electron-based terminals like Termius)
  *
+ * Focus restore (issue #859): the caller captures the target window handle at
+ * record start (the hex "TARGET %p" line that --detect-only prints), then
+ * passes it back as --restore-window <hwnd> at paste time. We re-activate that
+ * window before sending the keystroke so dictation lands in the field the user
+ * was in, even when something stole the foreground during transcription. This
+ * mirrors the macOS PID capture/activate path and the Linux --window path.
+ *
  * Compile with: cl /O2 windows-fast-paste.c /Fe:windows-fast-paste.exe user32.lib
  * Or with MinGW: gcc -O2 windows-fast-paste.c -o windows-fast-paste.exe -luser32
  */
@@ -17,6 +24,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 static const char* TERMINAL_CLASSES[] = {
@@ -72,6 +81,26 @@ static BOOL GetExeName(HWND hwnd, char* exeName, DWORD exeNameSize) {
 
     strncpy(exeName, baseName, exeNameSize - 1);
     exeName[exeNameSize - 1] = '\0';
+    return TRUE;
+}
+
+/* The window title as one UTF-8 line, for the Tone & Style app classifier: a
+   browser's title names the site it shows. Control characters and the
+   Unicode line separators become spaces, so a title can't start a line of
+   its own in this output. */
+static BOOL GetWindowTitleUtf8(HWND hwnd, char* title, int titleSize) {
+    wchar_t wideTitle[512];
+    int wideLen = GetWindowTextW(hwnd, wideTitle, 512);
+    if (wideLen <= 0) return FALSE;
+    for (int i = 0; i < wideLen; i++) {
+        if (wideTitle[i] < 0x20 || wideTitle[i] == 0x2028 || wideTitle[i] == 0x2029) {
+            wideTitle[i] = L' ';
+        }
+    }
+
+    int len = WideCharToMultiByte(CP_UTF8, 0, wideTitle, wideLen, title, titleSize - 1, NULL, NULL);
+    if (len <= 0) return FALSE;
+    title[len] = '\0';
     return TRUE;
 }
 
@@ -144,6 +173,45 @@ static int SendPasteNormal(void) {
     return (sent == 4) ? 0 : 1;
 }
 
+/* Bring a captured target window back to the foreground before pasting.
+   SetForegroundWindow alone is blocked by Windows' foreground lock when the
+   calling process isn't the current foreground owner, so we attach this
+   thread's input queue to both the current foreground thread and the target
+   thread first — the standard workaround, and what nircmd's "win activate"
+   does internally. Returns TRUE if the target ended up foreground. */
+static BOOL RestoreForegroundWindow(HWND target) {
+    if (!target || !IsWindow(target)) return FALSE;
+
+    if (GetForegroundWindow() == target) return TRUE;
+
+    if (IsIconic(target)) {
+        ShowWindow(target, SW_RESTORE);
+    }
+
+    HWND fg = GetForegroundWindow();
+    DWORD thisThread = GetCurrentThreadId();
+    DWORD targetThread = GetWindowThreadProcessId(target, NULL);
+    DWORD fgThread = fg ? GetWindowThreadProcessId(fg, NULL) : 0;
+
+    BOOL attachedTarget = FALSE;
+    BOOL attachedFg = FALSE;
+    if (targetThread && targetThread != thisThread) {
+        attachedTarget = AttachThreadInput(thisThread, targetThread, TRUE);
+    }
+    if (fgThread && fgThread != thisThread && fgThread != targetThread) {
+        attachedFg = AttachThreadInput(thisThread, fgThread, TRUE);
+    }
+
+    BringWindowToTop(target);
+    BOOL ok = SetForegroundWindow(target);
+    SetFocus(target);
+
+    if (attachedFg) AttachThreadInput(thisThread, fgThread, FALSE);
+    if (attachedTarget) AttachThreadInput(thisThread, targetThread, FALSE);
+
+    return ok && GetForegroundWindow() == target;
+}
+
 static int SendPasteTerminal(void) {
     INPUT inputs[6];
     ZeroMemory(inputs, sizeof(inputs));
@@ -159,13 +227,65 @@ static int SendPasteTerminal(void) {
     return (sent == 6) ? 0 : 1;
 }
 
+static int SendCopyNormal(void) {
+    INPUT inputs[4];
+    ZeroMemory(inputs, sizeof(inputs));
+
+    SetKey(&inputs[0], VK_LCONTROL, 0);
+    SetKey(&inputs[1], 'C', 0);
+    SetKey(&inputs[2], 'C', KEYEVENTF_KEYUP);
+    SetKey(&inputs[3], VK_LCONTROL, KEYEVENTF_KEYUP);
+
+    return (SendInput(4, inputs, sizeof(INPUT)) == 4) ? 0 : 1;
+}
+
+static int SendCopyTerminal(void) {
+    INPUT inputs[6];
+    ZeroMemory(inputs, sizeof(inputs));
+
+    SetKey(&inputs[0], VK_LCONTROL, 0);
+    SetKey(&inputs[1], VK_LSHIFT, 0);
+    SetKey(&inputs[2], 'C', 0);
+    SetKey(&inputs[3], 'C', KEYEVENTF_KEYUP);
+    SetKey(&inputs[4], VK_LSHIFT, KEYEVENTF_KEYUP);
+    SetKey(&inputs[5], VK_LCONTROL, KEYEVENTF_KEYUP);
+
+    return (SendInput(6, inputs, sizeof(INPUT)) == 6) ? 0 : 1;
+}
+
 int main(int argc, char* argv[]) {
     BOOL detectOnly = FALSE;
+    BOOL copyMode = FALSE;
+    BOOL capabilitiesOnly = FALSE;
+    HWND restoreWindow = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--detect-only") == 0) {
             detectOnly = TRUE;
+        } else if (strcmp(argv[i], "--copy") == 0) {
+            copyMode = TRUE;
+        } else if (strcmp(argv[i], "--capabilities") == 0) {
+            capabilitiesOnly = TRUE;
+        } else if (strcmp(argv[i], "--restore-window") == 0 && i + 1 < argc) {
+            /* Base 16: the handle comes back exactly as --detect-only printed
+               it with "TARGET %p" (hex, with or without an 0x prefix). */
+            restoreWindow = (HWND)(uintptr_t)strtoull(argv[++i], NULL, 16);
         }
+    }
+
+    if (capabilitiesOnly) {
+        printf("paste-v1 selection-copy-v1 target-identity-v1 focus-restore-v1\n");
+        return 0;
+    }
+
+    /* Restore the captured target to the foreground before pasting. If it is
+       gone or can't be restored we fall through to whatever is foreground now,
+       which is the pre-#859 behavior. The settle sleep only applies when a
+       window switch actually happened — in the common case where the target
+       never lost the foreground, the paste goes out immediately. */
+    if (restoreWindow && GetForegroundWindow() != restoreWindow &&
+        RestoreForegroundWindow(restoreWindow)) {
+        Sleep(20);
     }
 
     HWND hwnd = GetForegroundWindow();
@@ -191,9 +311,15 @@ int main(int argc, char* argv[]) {
     }
 
     if (detectOnly) {
+        printf("TARGET %p\n", (void*)hwnd);
         printf("WINDOW_CLASS %s\n", className);
         if (gotExeName) {
             printf("EXE_NAME %s\n", exeName);
+        }
+        /* 511 UTF-16 units take at most 1533 UTF-8 bytes. */
+        char title[1536];
+        if (GetWindowTitleUtf8(hwnd, title, sizeof(title))) {
+            printf("WINDOW_TITLE %s\n", title);
         }
         printf("IS_TERMINAL %s\n", isTerminal ? "true" : "false");
         fflush(stdout);
@@ -210,7 +336,11 @@ int main(int argc, char* argv[]) {
     int releasedCount = ReleaseModifiers(releasedInputs, releasedVKs);
 
     int result;
-    if (isTerminal) {
+    if (copyMode && isTerminal) {
+        result = SendCopyTerminal();
+    } else if (copyMode) {
+        result = SendCopyNormal();
+    } else if (isTerminal) {
         result = SendPasteTerminal();
     } else {
         result = SendPasteNormal();
@@ -225,7 +355,12 @@ int main(int argc, char* argv[]) {
 
     Sleep(20);
 
-    printf("PASTE_OK %s %s\n", className, isTerminal ? "ctrl+shift+v" : "ctrl+v");
+    if (copyMode) {
+        printf("COPY_OK %p %s %s\n", (void*)hwnd, className,
+               isTerminal ? "ctrl+shift+c" : "ctrl+c");
+    } else {
+        printf("PASTE_OK %s %s\n", className, isTerminal ? "ctrl+shift+v" : "ctrl+v");
+    }
     fflush(stdout);
 
     return 0;

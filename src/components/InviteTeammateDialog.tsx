@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2 } from "lucide-react";
+import { Loader2 } from "./icons";
 import {
   Dialog,
   DialogContent,
@@ -16,8 +16,8 @@ import { cn } from "./lib/utils";
 import { useWorkspaceStore } from "../stores/workspaceStore";
 import { useDelayedFlag } from "../hooks/useDelayedFlag";
 import { InvitationsService } from "../services/InvitationsService";
-import { CloudApiError } from "../services/cloudApi";
-import { WorkspacesService } from "../services/WorkspacesService";
+import { WorkspacesService, type SeatPreview } from "../services/WorkspacesService";
+import { formatAmount } from "../utils/formatAmount";
 import { useToast } from "./ui/useToast";
 
 interface Props {
@@ -25,11 +25,13 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   workspaceId: string;
   workspaceName: string;
-  onInvited?: () => void;
-  onNavigateToBilling?: () => void;
+  /** Receives the normalized email the invitation was sent to. */
+  onInvited?: (email: string) => void;
   cancelLabel?: string;
-  /** Team spaces the invitee joins on accept (threaded into the invitation). */
+  /** Teams the invitee joins on accept (threaded into the invitation). */
   teamIds?: string[];
+  /** Spaces the invitee is added to directly on accept. */
+  spaceIds?: string[];
   initialEmail?: string;
 }
 
@@ -39,9 +41,9 @@ export default function InviteTeammateDialog({
   workspaceId,
   workspaceName,
   onInvited,
-  onNavigateToBilling,
   cancelLabel,
   teamIds,
+  spaceIds,
   initialEmail,
 }: Props) {
   const { t } = useTranslation();
@@ -51,21 +53,27 @@ export default function InviteTeammateDialog({
   const [submitting, setSubmitting] = useState(false);
   const showSpinner = useDelayedFlag(submitting);
   const [seatsUsed, setSeatsUsed] = useState<number | null>(null);
-  const [seatLimitSeats, setSeatLimitSeats] = useState<number | null>(null);
+  const [seatPreview, setSeatPreview] = useState<SeatPreview | null>(null);
   const workspace = useWorkspaceStore((s) => s.workspaces.find((w) => w.id === workspaceId));
   const seats = workspace?.seats ?? null;
-  const isOwner = workspace?.role === "owner";
+  // A subscribed workspace already at capacity bills a seat if this invite is
+  // accepted. Say so before sending. Both sides of the
+  // comparison come from the same preview so a stale store can't misprice it.
+  const addsBilledSeat =
+    seatPreview !== null && seatPreview.seats_used >= seatPreview.current_quantity;
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     WorkspacesService.previewSeats(workspaceId, 1)
       .then((preview) => {
-        if (!cancelled) setSeatsUsed(preview.seats_used);
+        if (cancelled) return;
+        setSeatPreview(preview);
+        setSeatsUsed(preview.seats_used);
       })
       .catch(async () => {
-        // No subscription yet — fall back to the member count so the seat
-        // line always renders.
+        // Free workspace — the preview needs a subscription. Fall back to the
+        // member count so the seat line still renders, with nothing to bill.
         try {
           const members = await WorkspacesService.listMembers(workspaceId);
           if (!cancelled) setSeatsUsed(members.length);
@@ -85,7 +93,7 @@ export default function InviteTeammateDialog({
       setEmail("");
       setRole("member");
       setSeatsUsed(null);
-      setSeatLimitSeats(null);
+      setSeatPreview(null);
     }
   }, [open, initialEmail]);
 
@@ -93,12 +101,13 @@ export default function InviteTeammateDialog({
     e.preventDefault();
     if (!email.trim()) return;
     setSubmitting(true);
-    setSeatLimitSeats(null);
+    const normalizedEmail = email.trim().toLowerCase();
     try {
       const result = await InvitationsService.send(workspaceId, {
-        email: email.trim().toLowerCase(),
+        email: normalizedEmail,
         role,
         ...(teamIds && teamIds.length > 0 ? { team_ids: teamIds } : {}),
+        ...(spaceIds && spaceIds.length > 0 ? { space_ids: spaceIds } : {}),
       });
       if (result.email_sent) {
         toast({
@@ -112,22 +121,14 @@ export default function InviteTeammateDialog({
           variant: "destructive",
         });
       }
-      onInvited?.();
+      onInvited?.(normalizedEmail);
       onOpenChange(false);
     } catch (error) {
-      if (
-        error instanceof CloudApiError &&
-        (error.code === "seat_limit_reached" || error.code === "workspace_subscription_required")
-      ) {
-        const details = error.details as { seats?: number } | undefined;
-        setSeatLimitSeats(details?.seats ?? seats ?? 0);
-      } else {
-        toast({
-          title: t("workspaces.invite.errorTitle"),
-          description: error instanceof Error ? error.message : t("common.unknownError"),
-          variant: "destructive",
-        });
-      }
+      toast({
+        title: t("workspaces.invite.errorTitle"),
+        description: error instanceof Error ? error.message : t("common.unknownError"),
+        variant: "destructive",
+      });
     } finally {
       setSubmitting(false);
     }
@@ -151,6 +152,7 @@ export default function InviteTeammateDialog({
               {t("workspaces.invite.emailLabel")}
             </Label>
             <Input
+              dir="ltr"
               id="invite-email"
               type="email"
               autoFocus
@@ -171,11 +173,11 @@ export default function InviteTeammateDialog({
                   aria-pressed={role === r}
                   onClick={() => setRole(r)}
                   className={cn(
-                    "flex-1 px-3 py-2 rounded-md border text-left transition-colors",
+                    "flex-1 px-3 py-2 rounded-md border text-start transition-colors",
                     "outline-none focus-visible:ring-1 focus-visible:ring-primary/30",
                     role === r
                       ? "border-primary/40 bg-primary/8"
-                      : "border-border/60 hover:bg-foreground/4"
+                      : "border-border/70 hover:bg-foreground/4"
                   )}
                 >
                   <span
@@ -194,28 +196,12 @@ export default function InviteTeammateDialog({
             </div>
           </div>
 
-          {seatLimitSeats !== null && (
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 flex items-center justify-between gap-3">
-              <p className="text-xs text-destructive">
-                {isOwner
-                  ? t("workspaces.invite.seatLimit", { seats: seatLimitSeats })
-                  : t("workspaces.invite.askOwner", { seats: seatLimitSeats })}
-              </p>
-              {isOwner && onNavigateToBilling && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0"
-                  onClick={() => {
-                    onOpenChange(false);
-                    onNavigateToBilling();
-                  }}
-                >
-                  {t("workspaces.invite.manageSeats")}
-                </Button>
-              )}
-            </div>
+          {addsBilledSeat && (
+            <p className="text-[11px] text-muted-foreground">
+              {t("workspaces.invite.seatCost", {
+                amount: formatAmount(seatPreview.amount_due, seatPreview.currency),
+              })}
+            </p>
           )}
 
           <DialogFooter className="pt-1">
@@ -228,7 +214,7 @@ export default function InviteTeammateDialog({
               {cancelLabel ?? t("common.cancel")}
             </Button>
             <Button type="submit" disabled={!email.trim() || submitting}>
-              {showSpinner && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              {showSpinner && <Loader2 className="me-1.5 h-3.5 w-3.5 animate-spin" />}
               {submitting ? t("workspaces.invite.submitting") : t("workspaces.invite.submit")}
             </Button>
           </DialogFooter>

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useTranslation } from "react-i18next";
-import { Users, UserPlus, Trash2, LogOut, ChevronDown, Loader2 } from "lucide-react";
+import { Users, UserPlus, Trash2, LogOut, ChevronDown, Loader2 } from "../icons";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { WorkspacesService } from "../../services/WorkspacesService";
 import { useAuth } from "../../hooks/useAuth";
@@ -9,7 +9,7 @@ import { useDialogs } from "../../hooks/useDialogs";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Label } from "../ui/label";
+import { SettingsPanel, SettingsPanelRow, SettingsRow } from "../ui/SettingsSection";
 import { useToast } from "../ui/useToast";
 import { ConfirmDialog } from "../ui/dialog";
 import CreateWorkspaceDialog from "../CreateWorkspaceDialog";
@@ -23,11 +23,11 @@ import {
   DropdownMenuSeparator,
 } from "../ui/dropdown-menu";
 import { cn } from "../lib/utils";
-import { storeSeatIntent } from "../../utils/billingSeatIntent";
-import { canManageWorkspace } from "../../lib/spacePermissions";
+import { workspaceCan } from "../../lib/capabilities";
 import WorkspaceMembersTab from "./WorkspaceMembersTab";
 import WorkspaceTeamsTab from "./WorkspaceTeamsTab";
 import WorkspaceDeveloperTab from "./WorkspaceDeveloperTab";
+import EnterpriseConsoleRow from "./EnterpriseConsoleRow";
 import type { Workspace } from "../../types/electron";
 
 const SUB_TABS = ["general", "members", "teams", "developer"] as const;
@@ -35,10 +35,9 @@ type WorkspaceTab = (typeof SUB_TABS)[number];
 
 interface Props {
   initialSubTab?: string;
-  onNavigateToBilling?: () => void;
 }
 
-export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }: Props) {
+export default function WorkspaceSection({ initialSubTab }: Props) {
   const { t } = useTranslation();
   const { isSignedIn } = useAuth();
   const { workspaces, activeWorkspaceId, setActiveWorkspaceId, loaded, loading, error, refresh } =
@@ -59,12 +58,6 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
   );
   const [createOpen, setCreateOpen] = useState(false);
   const [inviteWorkspaceId, setInviteWorkspaceId] = useState<string | null>(null);
-
-  function navigateToBilling(workspaceId: string) {
-    setActiveWorkspaceId(workspaceId);
-    storeSeatIntent(workspaceId, 1);
-    onNavigateToBilling?.();
-  }
 
   useEffect(() => {
     if (isSignedIn && !loaded) void refresh();
@@ -99,7 +92,6 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
           workspaceId={inviteWorkspace.id}
           workspaceName={inviteWorkspace.name}
           cancelLabel={t("common.skip")}
-          onNavigateToBilling={() => navigateToBilling(inviteWorkspace.id)}
         />
       )}
     </>
@@ -126,7 +118,7 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
           </p>
         </div>
         {error ? (
-          <div className="rounded-lg border border-border/50 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 p-6 text-center">
+          <div className="rounded-lg border border-border/70 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 p-6 text-center">
             <p className="text-xs font-medium text-foreground mb-1">
               {t("settingsPage.workspace.loadError.title")}
             </p>
@@ -134,13 +126,13 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
               {t("settingsPage.workspace.loadError.description")}
             </p>
             <Button size="sm" variant="outline" onClick={() => void refresh()} disabled={loading}>
-              {loading && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              {loading && <Loader2 className="me-1.5 h-3.5 w-3.5 animate-spin" />}
               {t("settingsPage.workspace.loadError.retry")}
             </Button>
           </div>
         ) : (
-          <div className="rounded-lg border border-border/50 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 p-6 text-center">
-            <Users className="w-5 h-5 text-muted-foreground/60 mx-auto mb-2" />
+          <div className="rounded-lg border border-border/70 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 p-6 text-center">
+            <Users className="w-5 h-5 text-muted-foreground/70 mx-auto mb-2" />
             <p className="text-xs font-medium text-foreground mb-1">
               {t("settingsPage.workspace.empty.title")}
             </p>
@@ -148,7 +140,7 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
               {t("settingsPage.workspace.empty.description")}
             </p>
             <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <UserPlus className="mr-1.5 h-3.5 w-3.5" />
+              <UserPlus className="me-1.5 h-3.5 w-3.5" />
               {t("settingsPage.workspace.empty.create")}
             </Button>
           </div>
@@ -159,7 +151,7 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
   }
 
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? workspaces[0];
-  const canManage = canManageWorkspace(workspace.role);
+  const canManage = workspaceCan(workspace, "manage_settings");
   const visibleTabs = SUB_TABS.filter((id) => id !== "developer" || canManage);
   const tab: WorkspaceTab = visibleTabs.includes(storedTab as WorkspaceTab)
     ? (storedTab as WorkspaceTab)
@@ -176,7 +168,9 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
                 "hover:bg-foreground/5 dark:hover:bg-white/5 focus-visible:ring-1 focus-visible:ring-primary/30"
               )}
             >
-              <h2 className="text-sm font-semibold text-foreground truncate">{workspace.name}</h2>
+              <h2 dir="auto" className="text-sm font-semibold text-foreground truncate">
+                {workspace.name}
+              </h2>
               <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
@@ -189,23 +183,39 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
                   onSelect={() => setActiveWorkspaceId(w.id)}
                   className="text-xs"
                 >
-                  {w.name}
+                  <span dir="auto">{w.name}</span>
                 </DropdownMenuItem>
               ))}
               <DropdownMenuSeparator />
               <DropdownMenuItem onSelect={() => setCreateOpen(true)} className="text-xs">
-                <UserPlus className="mr-1.5 h-3.5 w-3.5" />
+                <UserPlus className="me-1.5 h-3.5 w-3.5" />
                 {t("workspaces.switcher.create")}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <p className="text-xs text-muted-foreground mt-0.5">
-            {t(`settingsPage.workspace.role.${workspace.role}`)} · {workspace.slug}
+            {t(`settingsPage.workspace.role.${workspace.role}`)}
           </p>
         </div>
       </div>
 
-      <div className="border-b border-border/40 dark:border-border-subtle/60 -mx-1">
+      {/* The last refresh failed, so this is the list from memory or the cache. */}
+      {error && (
+        <div
+          role="status"
+          className="flex items-center gap-3 rounded-lg border border-border/70 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 px-3 py-2"
+        >
+          <p className="flex-1 text-xs text-muted-foreground">
+            {t("settingsPage.workspace.staleList")}
+          </p>
+          <Button size="sm" variant="outline" onClick={() => void refresh()} disabled={loading}>
+            {loading && <Loader2 className="me-1.5 h-3.5 w-3.5 animate-spin" />}
+            {t("settingsPage.workspace.loadError.retry")}
+          </Button>
+        </div>
+      )}
+
+      <div className="border-b border-border/70 dark:border-border-subtle/60 -mx-1">
         <div role="tablist" className="flex gap-0.5 px-1">
           {visibleTabs.map((id) => (
             <button
@@ -230,12 +240,7 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
 
       <div className="pt-1">
         {tab === "general" && <GeneralTab workspace={workspace} />}
-        {tab === "members" && (
-          <WorkspaceMembersTab
-            workspace={workspace}
-            onNavigateToBilling={() => navigateToBilling(workspace.id)}
-          />
-        )}
+        {tab === "members" && <WorkspaceMembersTab workspace={workspace} />}
         {tab === "teams" && <WorkspaceTeamsTab workspace={workspace} />}
         {tab === "developer" && canManage && <WorkspaceDeveloperTab workspace={workspace} />}
       </div>
@@ -245,8 +250,6 @@ export default function WorkspaceSection({ initialSubTab, onNavigateToBilling }:
   );
 }
 
-const SLUG_PATTERN = /^[a-z0-9-]+$/;
-
 function GeneralTab({ workspace }: { workspace: Workspace }) {
   const { t } = useTranslation();
   const { toast } = useToast();
@@ -255,24 +258,22 @@ function GeneralTab({ workspace }: { workspace: Workspace }) {
   const refresh = useWorkspaceStore((s) => s.refresh);
   const setActive = useWorkspaceStore((s) => s.setActiveWorkspaceId);
   const [name, setName] = useState(workspace.name);
-  const [slug, setSlug] = useState(workspace.slug);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [leaving, setLeaving] = useState(false);
-  const isOwner = workspace.role === "owner";
-  const canEdit = canManageWorkspace(workspace.role);
-  const dirty = name !== workspace.name || slug !== workspace.slug;
-  const slugInvalid = slug.length > 0 && !SLUG_PATTERN.test(slug);
+  const canDelete = workspaceCan(workspace, "delete_workspace");
+  const canLeave = workspaceCan(workspace, "leave");
+  const canEdit = workspaceCan(workspace, "manage_settings");
+  const dirty = name !== workspace.name;
 
   useEffect(() => {
     setName(workspace.name);
-    setSlug(workspace.slug);
-  }, [workspace.id, workspace.name, workspace.slug]);
+  }, [workspace.id, workspace.name]);
 
   async function handleSave() {
     setSaving(true);
     try {
-      await WorkspacesService.update(workspace.id, { name, slug });
+      await WorkspacesService.update(workspace.id, { name });
       await refresh();
       toast({ title: t("settingsPage.workspace.general.saved") });
     } catch (error) {
@@ -341,110 +342,84 @@ function GeneralTab({ workspace }: { workspace: Workspace }) {
 
   return (
     <div className="space-y-4">
-      <div className="space-y-3 rounded-lg border border-border/50 dark:border-border-subtle/70 bg-card/50 dark:bg-surface-2/50 p-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="ws-name" className="text-xs font-medium">
-            {t("settingsPage.workspace.general.nameLabel")}
-          </Label>
-          <Input
-            id="ws-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            disabled={!canEdit}
-            maxLength={80}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="ws-slug" className="text-xs font-medium">
-            {t("settingsPage.workspace.general.slugLabel")}
-          </Label>
-          <Input
-            id="ws-slug"
-            value={slug}
-            onChange={(e) => setSlug(e.target.value)}
-            disabled={!canEdit}
-            maxLength={48}
-            aria-invalid={slugInvalid}
-          />
-          {slugInvalid ? (
-            <p className="text-[11px] text-destructive">
-              {t("settingsPage.workspace.general.slugInvalid")}
-            </p>
-          ) : (
-            <p className="text-[11px] text-muted-foreground">
-              {t("settingsPage.workspace.general.slugHint")}
-            </p>
-          )}
-        </div>
-        {canEdit && (
-          <div className="pt-1">
-            <Button
-              onClick={handleSave}
-              size="sm"
-              disabled={!dirty || !name.trim() || !slug || slugInvalid || saving}
-            >
-              {saving && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              {saving ? t("common.saving") : t("common.save")}
-            </Button>
-          </div>
-        )}
-      </div>
+      <SettingsPanel>
+        <SettingsPanelRow>
+          <SettingsRow label={t("settingsPage.workspace.general.nameLabel")}>
+            <div className="flex gap-2">
+              <Input
+                dir="auto"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                aria-label={t("settingsPage.workspace.general.nameLabel")}
+                disabled={!canEdit || saving}
+                maxLength={80}
+                className="h-8 w-56 text-xs"
+              />
+              {canEdit && (
+                <Button size="sm" onClick={handleSave} disabled={!dirty || !name.trim() || saving}>
+                  {saving ? t("common.saving") : t("common.save")}
+                </Button>
+              )}
+            </div>
+          </SettingsRow>
+        </SettingsPanelRow>
+      </SettingsPanel>
 
-      {isOwner ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/3 dark:bg-destructive/6 p-4 space-y-3">
-          <div>
-            <p className="text-xs font-medium text-foreground">
-              {t("settingsPage.workspace.general.dangerTitle")}
-            </p>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {t("settingsPage.workspace.general.dangerDescription")}
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={confirmDelete}
-            disabled={deleting}
-            className="text-destructive border-destructive/30 hover:bg-destructive/10 hover:border-destructive/50"
-          >
-            {deleting ? (
-              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-            )}
-            {deleting
-              ? t("settingsPage.workspace.general.deleting")
-              : t("settingsPage.workspace.general.delete")}
-          </Button>
-        </div>
-      ) : (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/3 dark:bg-destructive/6 p-4 space-y-3">
-          <div>
-            <p className="text-xs font-medium text-foreground">
-              {t("settingsPage.workspace.general.leaveTitle")}
-            </p>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {t("settingsPage.workspace.general.leaveDescription")}
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={confirmLeave}
-            disabled={leaving}
-            className="text-destructive border-destructive/30 hover:bg-destructive/10 hover:border-destructive/50"
-          >
-            {leaving ? (
-              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <LogOut className="mr-1.5 h-3.5 w-3.5" />
-            )}
-            {leaving
-              ? t("settingsPage.workspace.general.leaving")
-              : t("settingsPage.workspace.general.leave")}
-          </Button>
-        </div>
-      )}
+      <EnterpriseConsoleRow workspace={workspace} />
+
+      {canDelete ? (
+        <SettingsPanel>
+          <SettingsPanelRow>
+            <SettingsRow
+              label={t("settingsPage.workspace.general.dangerTitle")}
+              description={t("settingsPage.workspace.general.dangerDescription")}
+            >
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={confirmDelete}
+                disabled={deleting}
+                className="text-destructive border-destructive/30 hover:bg-destructive/10 hover:border-destructive"
+              >
+                {deleting ? (
+                  <Loader2 className="me-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="me-1.5 h-3.5 w-3.5" />
+                )}
+                {deleting
+                  ? t("settingsPage.workspace.general.deleting")
+                  : t("settingsPage.workspace.general.delete")}
+              </Button>
+            </SettingsRow>
+          </SettingsPanelRow>
+        </SettingsPanel>
+      ) : canLeave ? (
+        <SettingsPanel>
+          <SettingsPanelRow>
+            <SettingsRow
+              label={t("settingsPage.workspace.general.leaveTitle")}
+              description={t("settingsPage.workspace.general.leaveDescription")}
+            >
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={confirmLeave}
+                disabled={leaving}
+                className="text-destructive border-destructive/30 hover:bg-destructive/10 hover:border-destructive"
+              >
+                {leaving ? (
+                  <Loader2 className="me-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <LogOut className="me-1.5 h-3.5 w-3.5" />
+                )}
+                {leaving
+                  ? t("settingsPage.workspace.general.leaving")
+                  : t("settingsPage.workspace.general.leave")}
+              </Button>
+            </SettingsRow>
+          </SettingsPanelRow>
+        </SettingsPanel>
+      ) : null}
 
       <ConfirmDialog
         open={confirmDialog.open}

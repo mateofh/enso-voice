@@ -1,4 +1,6 @@
 import { RETRY_CONFIG } from "../config/constants.ts";
+import { LLM_REQUEST_TIMEOUT_CODE } from "../helpers/llmRequestTimeout.js";
+import { PROVIDER_ERROR_CODES } from "../helpers/providerHttpErrors.js";
 
 export interface RetryOptions {
   maxRetries?: number;
@@ -48,12 +50,20 @@ export function httpError(message: string, status: number): Error & { status: nu
 export function createApiRetryStrategy() {
   return {
     shouldRetry: (error: any) => {
-      // No HTTP status means the request never got an answer (network drop, timeout).
+      // A client-side deadline is not a transient fault: the same request under
+      // the same deadline expires again, and the provider bills every attempt.
+      if (error?.code === LLM_REQUEST_TIMEOUT_CODE) return false;
+
+      // An empty account stays empty: retrying only delays the message.
+      if (error?.code === PROVIDER_ERROR_CODES.QUOTA_EXHAUSTED) return false;
+
+      // No HTTP status means the request never got an answer (network drop).
       const status = error?.status ?? error?.response?.status;
       if (typeof status !== "number") return true;
 
-      // 4xx are deterministic rejections; only rate limits and server faults can clear on retry.
-      return status === 429 || (status >= 500 && status < 600);
+      // Most 4xx are deterministic rejections. 408 is a request timeout and 429 is
+      // a rate limit; both can clear on retry, as can 5xx server faults.
+      return status === 408 || status === 429 || (status >= 500 && status < 600);
     },
   };
 }

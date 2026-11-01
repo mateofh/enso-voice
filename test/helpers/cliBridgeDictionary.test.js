@@ -33,11 +33,13 @@ process.env.NODE_ENV = "test";
 
 const DatabaseManager = require("../../src/helpers/database.js");
 const CliBridge = require("../../src/helpers/cliBridge.js");
+const { call } = require("./harness/cliBridge.js");
 
 function isNativeBindingUnavailable(error) {
   const message = String(error?.message || error);
   return (
-    message.includes("NODE_MODULE_VERSION") || message.includes("Could not locate the bindings file")
+    message.includes("NODE_MODULE_VERSION") ||
+    message.includes("Could not locate the bindings file")
   );
 }
 
@@ -63,16 +65,6 @@ function createBridge(t) {
   broadcasts.length = 0;
   const bridge = new CliBridge({ databaseManager: db });
   return { bridge, db, broadcasts };
-}
-
-function call(bridge, method, pathname, body) {
-  for (const route of bridge.routes) {
-    if (route.method !== method) continue;
-    const params = route.match(pathname);
-    if (!params) continue;
-    return route.handler({ params, query: new URLSearchParams(), body });
-  }
-  throw new Error(`No route for ${method} ${pathname}`);
 }
 
 test("GET /v1/dictionary/list returns the stored words", (t) => {
@@ -158,4 +150,88 @@ test("POST /v1/dictionary/update rejects an empty request", (t) => {
   assert.throws(() => call(ctx.bridge, "POST", "/v1/dictionary/update", {}), {
     code: "VALIDATION",
   });
+});
+
+test("route validation errors respond with HTTP 400 validation_error", async (t) => {
+  const ctx = createBridge(t);
+  if (!ctx) return;
+
+  ctx.bridge.token = "test-token";
+  ctx.bridge.port = 8200;
+
+  class MockResponse {
+    constructor() {
+      this.statusCode = null;
+      this.headers = {};
+      this.body = "";
+    }
+    writeHead(code, headers) {
+      this.statusCode = code;
+      this.headers = headers;
+    }
+    end(chunk) {
+      if (chunk) this.body += chunk;
+    }
+  }
+
+  const req = {
+    socket: { remoteAddress: "127.0.0.1" },
+    headers: { authorization: "Bearer test-token" },
+    method: "GET",
+    url: "/v1/notes/search",
+  };
+  const res = new MockResponse();
+
+  await ctx.bridge._handleRequest(req, res);
+
+  assert.equal(res.statusCode, 400);
+  const parsed = JSON.parse(res.body);
+  assert.equal(parsed.error.code, "validation_error");
+  assert.equal(parsed.error.message, "Search query is required");
+});
+
+test("POST /v1/dictionary/update responds with HTTP 400 validation_error for invalid payload", async (t) => {
+  const ctx = createBridge(t);
+  if (!ctx) return;
+
+  ctx.bridge.token = "test-token";
+  ctx.bridge.port = 8200;
+
+  class MockResponse {
+    constructor() {
+      this.statusCode = null;
+      this.headers = {};
+      this.body = "";
+    }
+    writeHead(code, headers) {
+      this.statusCode = code;
+      this.headers = headers;
+    }
+    end(chunk) {
+      if (chunk) this.body += chunk;
+    }
+  }
+
+  const req = {
+    socket: { remoteAddress: "127.0.0.1" },
+    headers: { authorization: "Bearer test-token" },
+    method: "POST",
+    url: "/v1/dictionary/update",
+    on(event, handler) {
+      if (event === "data") {
+        handler(JSON.stringify({ add: "not-an-array" }));
+      }
+      if (event === "end") {
+        handler();
+      }
+    },
+  };
+  const res = new MockResponse();
+
+  await ctx.bridge._handleRequest(req, res);
+
+  assert.equal(res.statusCode, 400);
+  const parsed = JSON.parse(res.body);
+  assert.equal(parsed.error.code, "validation_error");
+  assert.equal(parsed.error.message, "'add' must be an array of strings");
 });

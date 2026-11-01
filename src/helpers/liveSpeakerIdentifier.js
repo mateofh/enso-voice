@@ -4,11 +4,31 @@ const speakerEmbeddings = require("./speakerEmbeddings");
 const { MAX_EMBEDDING_SECONDS } = speakerEmbeddings;
 const { downsample24kTo16k, pcm16ToFloat32 } = require("../utils/audioUtils");
 const { MAX_SPEAKER_COUNT } = require("../constants/speakerDetection.json");
+const { normalizeSpeakerIndexBase } = require("./speakerIndexBase");
 
 function clampMaxSpeakers(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return MAX_SPEAKER_COUNT;
   return Math.max(1, Math.min(MAX_SPEAKER_COUNT, Math.floor(n)));
+}
+
+// onnxruntime-node ships no darwin/x64 prebuilt binding since 1.24, so the
+// require throws on Intel Macs (#1500). A missing binding must degrade live
+// speaker identification, never fail the meeting start that triggers it.
+let ortLoadFailed = false;
+
+function loadOnnxRuntime() {
+  if (ortLoadFailed) return null;
+  try {
+    return require("onnxruntime-node");
+  } catch (error) {
+    ortLoadFailed = true;
+    debugLogger.warn(
+      "onnxruntime-node binding failed to load — live speaker identification disabled",
+      { error: error.message, platform: process.platform, arch: process.arch }
+    );
+    return null;
+  }
 }
 
 const SAMPLE_RATE = 16000;
@@ -29,7 +49,20 @@ const SILENCE_WINDOWS_TO_END = 24;
 const MATCH_THRESHOLD = 0.65;
 const MATCH_MARGIN = 0.03;
 const LIVE_WINDOW_PADDING_SECONDS = 0.75;
+// The 24 kHz -> 16 kHz resampler restarts on every buffer and only divides
+// evenly on whole groups of 3 input samples (6 bytes). Capture buffers come in
+// arbitrary sizes (PipeWire quantum, coalesced pipe reads, renderer loopback
+// frames, recovery silence), so a partial group is carried into the next
+// buffer; dropping it pulls the identifier clock behind real time.
+const RESAMPLE_GROUP_BYTES = 6;
 const DEFAULT_VAD_STATE_SHAPE = [2, 1, 64];
+// The VAD graph is tiny (~64 ops per 512-sample window at ~31 Hz); ORT's
+// default thread pool spins one worker per core for no throughput gain.
+const VAD_SESSION_OPTIONS = {
+  intraOpNumThreads: 1,
+  interOpNumThreads: 1,
+  executionMode: "sequential",
+};
 
 function appendFloat32(existing, next) {
   if (!existing.length) return next;
@@ -41,16 +74,17 @@ function appendFloat32(existing, next) {
   return merged;
 }
 
+function totalSampleCount(chunks) {
+  let total = 0;
+  for (const chunk of chunks) total += chunk.length;
+  return total;
+}
+
 function concatFloat32Arrays(chunks) {
   if (chunks.length === 0) return new Float32Array(0);
   if (chunks.length === 1) return chunks[0];
 
-  let totalLength = 0;
-  for (const chunk of chunks) {
-    totalLength += chunk.length;
-  }
-
-  const merged = new Float32Array(totalLength);
+  const merged = new Float32Array(totalSampleCount(chunks));
   let offset = 0;
   for (const chunk of chunks) {
     merged.set(chunk, offset);
@@ -61,8 +95,7 @@ function concatFloat32Arrays(chunks) {
 }
 
 function trimChunksToMaxSamples(chunks, maxSamples) {
-  let total = 0;
-  for (const chunk of chunks) total += chunk.length;
+  let total = totalSampleCount(chunks);
   while (total > maxSamples && chunks.length > 0) {
     total -= chunks[0].length;
     chunks.shift();
@@ -119,6 +152,7 @@ class LiveSpeakerIdentifier {
     this.queue = Promise.resolve();
     this.onSpeakerIdentified = null;
     this.getSpeakerProfiles = null;
+    this.pcmRemainder = Buffer.alloc(0);
     this.audioRemainder = new Float32Array(0);
     this.vadStateInputs = [];
     this.vadStateOutputs = [];
@@ -148,7 +182,11 @@ class LiveSpeakerIdentifier {
   }
 
   isAvailable() {
-    return this._diarizationManager?.isVadModelDownloaded() && speakerEmbeddings.isAvailable();
+    return (
+      this._diarizationManager?.isVadModelDownloaded() &&
+      speakerEmbeddings.isAvailable() &&
+      loadOnnxRuntime() !== null
+    );
   }
 
   getTransientState() {
@@ -179,6 +217,7 @@ class LiveSpeakerIdentifier {
       getSpeakerProfiles = null,
       maxSpeakers = MAX_SPEAKER_COUNT,
       enabled = true,
+      speakerIndexBase = 0,
     } = resolvedOptions;
 
     this.onSpeakerIdentified =
@@ -187,6 +226,8 @@ class LiveSpeakerIdentifier {
     this.maxSpeakers = clampMaxSpeakers(maxSpeakers);
     this.enabled = enabled !== false;
     this._resetMeetingState();
+    // A resumed note already holds earlier sessions' ids; see speakerIndexBase.js.
+    this.nextLiveIndex = normalizeSpeakerIndexBase(speakerIndexBase);
 
     if (!this.isAvailable()) {
       debugLogger.warn("Live speaker identifier unavailable", {
@@ -243,6 +284,15 @@ class LiveSpeakerIdentifier {
 
         const similarity = speakerEmbeddings.cosineSimilarity(speakers[i][1], speakers[j][1]);
         if (similarity < MATCH_THRESHOLD) continue;
+
+        // Confirmed-distinct identities (different profiles, or different
+        // user-set names) must never merge on embedding similarity alone.
+        const profileI = this.transientProfileIds.get(speakers[i][0]);
+        const profileJ = this.transientProfileIds.get(speakers[j][0]);
+        if (profileI != null && profileJ != null && profileI !== profileJ) continue;
+        const nameI = this.transientDisplayNames.get(speakers[i][0]);
+        const nameJ = this.transientDisplayNames.get(speakers[j][0]);
+        if (nameI && nameJ && nameI !== nameJ) continue;
 
         const countI = this.transientCounts.get(speakers[i][0]) || 1;
         const countJ = this.transientCounts.get(speakers[j][0]) || 1;
@@ -333,6 +383,15 @@ class LiveSpeakerIdentifier {
 
   mapSpeaker(liveId, profileId, displayName, noteId) {
     if (!liveId || !this.transientEmbeddings.has(liveId)) {
+      // Labeling a speaker in a past note routes here with no live session, so
+      // only an active session losing a mapping is worth flagging.
+      if (this.running) {
+        debugLogger.warn("Live speaker mapping dropped: unknown speaker id", {
+          liveId,
+          hasDisplayName: !!displayName,
+          knownSpeakers: [...this.transientEmbeddings.keys()],
+        });
+      }
       return false;
     }
 
@@ -359,8 +418,10 @@ class LiveSpeakerIdentifier {
       return;
     }
 
-    const ort = require("onnxruntime-node");
-    this.session = await ort.InferenceSession.create(vadModelPath);
+    const ort = loadOnnxRuntime();
+    if (!ort) return;
+
+    this.session = await ort.InferenceSession.create(vadModelPath, VAD_SESSION_OPTIONS);
     this.vadStateInputs = (this.session.inputNames || []).filter((name) => /state|h|c/i.test(name));
     this.vadStateOutputs = (this.session.outputNames || []).filter((name) =>
       /state|h|c/i.test(name)
@@ -370,6 +431,7 @@ class LiveSpeakerIdentifier {
 
   _resetMeetingState() {
     this.queue = Promise.resolve();
+    this.pcmRemainder = Buffer.alloc(0);
     this.audioRemainder = new Float32Array(0);
     this.speechChunks = [];
     this.speechActive = false;
@@ -408,9 +470,16 @@ class LiveSpeakerIdentifier {
     await this._ensureLoaded();
     if (!this.session) return;
 
-    const downsampled = downsample24kTo16k(
-      Buffer.isBuffer(pcmBuffer) ? pcmBuffer : Buffer.from(pcmBuffer)
-    );
+    // Carry the bytes past the last whole resample group into the next buffer.
+    // The concat copies into a new buffer, so the Int16 view never inherits the
+    // caller's byteOffset.
+    const incoming = Buffer.isBuffer(pcmBuffer) ? pcmBuffer : Buffer.from(pcmBuffer);
+    const pending = Buffer.concat([this.pcmRemainder, incoming]);
+    const usableBytes = pending.length - (pending.length % RESAMPLE_GROUP_BYTES);
+    this.pcmRemainder = Buffer.from(pending.subarray(usableBytes));
+    if (!usableBytes) return;
+
+    const downsampled = downsample24kTo16k(pending.subarray(0, usableBytes));
     if (!downsampled.length) return;
 
     this.audioRemainder = appendFloat32(this.audioRemainder, pcm16ToFloat32(downsampled));
@@ -464,7 +533,8 @@ class LiveSpeakerIdentifier {
   async _getVadProbability(window) {
     if (!this.session) return 0;
 
-    const ort = require("onnxruntime-node");
+    const ort = loadOnnxRuntime();
+    if (!ort) return 0;
     const feeds = {};
     const audioInputName = (this.session.inputNames || []).find(
       (name) => !this.vadStateInputs.includes(name) && !/sr|sample.?rate/i.test(name)
@@ -527,14 +597,12 @@ class LiveSpeakerIdentifier {
   }
 
   async _identifyActiveSpeechSegment(force = false) {
-    const allSamples = concatFloat32Arrays(this.speechChunks);
-    if (allSamples.length < LIVE_IDENTIFICATION_MIN_SAMPLES) {
+    // Runs on every speech window (~31x/sec), so the cheap gates must come
+    // first — concatenating up to 32s of float32 per window is ~64 MB/s of
+    // wasted main-thread memcpy during continuous speech.
+    if (totalSampleCount(this.speechChunks) < LIVE_IDENTIFICATION_MIN_SAMPLES) {
       return;
     }
-    const currentSamples =
-      allSamples.length > MAX_EMBEDDING_SAMPLES
-        ? allSamples.subarray(allSamples.length - MAX_EMBEDDING_SAMPLES)
-        : allSamples;
 
     if (
       !force &&
@@ -544,6 +612,12 @@ class LiveSpeakerIdentifier {
     ) {
       return;
     }
+
+    const allSamples = concatFloat32Arrays(this.speechChunks);
+    const currentSamples =
+      allSamples.length > MAX_EMBEDDING_SAMPLES
+        ? allSamples.subarray(allSamples.length - MAX_EMBEDDING_SAMPLES)
+        : allSamples;
 
     const embedding = await speakerEmbeddings.extractEmbeddingFromSamples(currentSamples);
     if (!embedding) {
@@ -696,10 +770,22 @@ class LiveSpeakerIdentifier {
     const matchedProfile = this._findStoredProfileMatch(embedding);
     if (matchedProfile) {
       speakerId = this._findTransientSpeakerForProfile(matchedProfile.id);
+      let forced = false;
       if (!speakerId) {
-        speakerId = this._assignOrForceCluster(embedding);
+        ({ speakerId, forced } = this._assignOrForceCluster(embedding));
       } else if (updateCentroid) {
         this._updateCentroid(speakerId, embedding);
+      }
+
+      // A forced at-cap fold lands on someone else's cluster — retagging it
+      // with the overflow speaker's profile would erase the original identity
+      // and keep capturing this voice via the profile lookup even after the
+      // cap rises.
+      if (forced) {
+        return {
+          speakerId,
+          displayName: this.transientDisplayNames.get(speakerId) || null,
+        };
       }
 
       this.transientProfileIds.set(speakerId, matchedProfile.id);
@@ -710,9 +796,13 @@ class LiveSpeakerIdentifier {
       };
     }
 
-    speakerId = this.currentSegmentSpeakerId || this._assignOrForceCluster(embedding);
-    if (updateCentroid && this.currentSegmentSpeakerId) {
-      this._updateCentroid(speakerId, embedding);
+    speakerId = this.currentSegmentSpeakerId;
+    if (speakerId) {
+      if (updateCentroid) {
+        this._updateCentroid(speakerId, embedding);
+      }
+    } else {
+      ({ speakerId } = this._assignOrForceCluster(embedding));
     }
 
     return {
@@ -725,11 +815,14 @@ class LiveSpeakerIdentifier {
     if (this.transientEmbeddings.size >= this.maxSpeakers) {
       const nearest = this._findNearestTransient(embedding);
       if (nearest) {
-        this._updateCentroid(nearest, embedding);
-        return nearest;
+        // Label only — never fold the embedding into the centroid. At-cap
+        // overflow is usually a different voice, and a polluted centroid would
+        // keep capturing it even after the cap rises (participants added
+        // mid-meeting).
+        return { speakerId: nearest, forced: true };
       }
     }
-    return this._assignSpeakerId(embedding);
+    return { speakerId: this._assignSpeakerId(embedding), forced: false };
   }
 
   _findNearestTransient(embedding) {
@@ -755,6 +848,10 @@ class LiveSpeakerIdentifier {
     return null;
   }
 
+  // Cluster ids double as the transcript's speaker labels. Ids freed by a
+  // recluster merge are never reused: durable state (note speaker mappings,
+  // the renderer's name map) may still reference them, and a recycled id would
+  // let a new voice inherit the previous person's identity.
   _assignSpeakerId(embedding) {
     const speakerId = `speaker_${this.nextLiveIndex}`;
     this.nextLiveIndex += 1;

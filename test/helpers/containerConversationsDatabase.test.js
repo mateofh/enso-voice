@@ -49,7 +49,9 @@ function createDb(t) {
   }
 
   try {
-    return new DatabaseManager();
+    const database = new DatabaseManager();
+    database.setActiveAccountId("test-account");
+    return database;
   } catch (error) {
     if (isNativeBindingUnavailable(error)) {
       t.skip("better-sqlite3 native binding is not available for this Node runtime");
@@ -73,6 +75,9 @@ function createTestTeamSpace(db, { name, emoji = null } = {}) {
       emoji,
       (maxOrder?.max_order ?? 0) + 1
     );
+  db.db
+    .prepare("INSERT INTO space_accounts (space_id, account_id) VALUES (?, ?)")
+    .run(result.lastInsertRowid, "test-account");
   return { success: true, space: db.getSpace(result.lastInsertRowid) };
 }
 
@@ -187,6 +192,74 @@ test("getConversationsForContainer excludes deleted conversations", (t) => {
   assert.equal(db.getConversationsForContainer(space.id, null).length, 0);
 });
 
+test("private-space root chats are owned by the account that created them", (t) => {
+  const db = createDb(t);
+  if (!db) return;
+  const privateSpaceId = db.getPrivateSpaceId();
+  // A row from before root chats carried an owner stays visible to everyone,
+  // like a legacy personal note.
+  const legacy = db.createAgentConversation("Legacy root chat", null, privateSpaceId);
+  db.db.prepare("UPDATE agent_conversations SET account_id = NULL WHERE id = ?").run(legacy.id);
+
+  db.setActiveAccountId("account-a");
+  const chatA = db.createAgentConversation("A root chat", null, privateSpaceId);
+  db.addAgentMessage(chatA.id, "user", "private to A");
+  db.setActiveAccountId("account-b");
+  const chatB = db.createAgentConversation("B root chat", null, privateSpaceId);
+
+  assert.deepEqual(
+    db
+      .getConversationsForContainer(privateSpaceId, null)
+      .map((conversation) => conversation.id)
+      .sort((a, b) => a - b),
+    [legacy.id, chatB.id],
+    "another account on the device must not list A's root chats"
+  );
+  db.setActiveAccountId(null);
+  assert.deepEqual(
+    db.getConversationsForContainer(privateSpaceId, null).map((conversation) => conversation.id),
+    [legacy.id],
+    "signed out, only device-owned root chats are listed"
+  );
+
+  db.setActiveAccountId("account-a");
+  db.deleteAccountData("account-a");
+  const remaining = db.db
+    .prepare("SELECT id FROM agent_conversations ORDER BY id")
+    .all()
+    .map((row) => row.id);
+  assert.deepEqual(remaining, [legacy.id, chatB.id], "account deletion removes A's root chats");
+  assert.equal(
+    db.db
+      .prepare("SELECT COUNT(*) AS count FROM agent_messages WHERE conversation_id = ?")
+      .get(chatA.id).count,
+    0
+  );
+});
+
+test("team-space root chats stay unowned and outlive a member's account deletion", (t) => {
+  const db = createDb(t);
+  if (!db) return;
+  const { space } = createTestTeamSpace(db, { name: "Shared" });
+  db.db
+    .prepare("INSERT INTO space_accounts (space_id, account_id) VALUES (?, ?)")
+    .run(space.id, "account-a");
+
+  db.setActiveAccountId("account-a");
+  const chat = db.createAgentConversation("Team root chat", null, space.id);
+  db.addAgentMessage(chat.id, "user", "for the whole team");
+  assert.equal(chat.account_id, null, "team root chats are owned by the team, not the creator");
+
+  db.deleteAccountData("account-a");
+  db.setActiveAccountId("test-account");
+  assert.deepEqual(
+    db.getConversationsForContainer(space.id, null).map((conversation) => conversation.id),
+    [chat.id],
+    "another member still lists the team's root chat"
+  );
+  assert.equal(db.getAgentMessages(chat.id).length, 1);
+});
+
 test("global conversation lists and search exclude space and folder chats", (t) => {
   const db = createDb(t);
   if (!db) return;
@@ -240,6 +313,25 @@ test("searchNotes filters by folder", (t) => {
   const folderHits = db.searchNotes("roadmap", 10, space.id, folder.id);
   assert.equal(folderHits.length, 1);
   assert.equal(folderHits[0].folder_id, folder.id);
+});
+
+test("getNotes and searchNotes keep to the listed spaces", (t) => {
+  const db = createDb(t);
+  if (!db) return;
+  const shown = createTestTeamSpace(db, { name: "Shown" }).space;
+  const hidden = createTestTeamSpace(db, { name: "Hidden" }).space;
+  const folder = db.createFolder("Docs", hidden.id).folder;
+
+  const shownNote = db.saveNote("Roadmap", "roadmap", "personal", null, null, null, shown.id).note;
+  db.saveNote("Roadmap too", "roadmap", "personal", null, null, folder.id, hidden.id);
+
+  const ids = (notes) => notes.map((n) => n.id);
+  assert.deepEqual(ids(db.getNotes(null, 50, null, null, [shown.id])), [shownNote.id]);
+  assert.deepEqual(ids(db.searchNotes("roadmap", 10, null, null, [shown.id])), [shownNote.id]);
+  assert.deepEqual(db.getNotes(null, 50, null, null, []), []);
+  // No list scopes nothing.
+  assert.equal(db.getNotes(null, 50).length, 2);
+  assert.equal(db.searchNotes("roadmap", 10).length, 2);
 });
 
 test("getNotesForSpace includes foldered notes, unlike the root-only getNotes", (t) => {
@@ -300,7 +392,7 @@ test("getNoteIdsInScope validates vector candidates against the current SQLite s
   );
 });
 
-test("upsertNoteFromCloud round-trips updated_by_user_id", (t) => {
+test("upsertNoteFromCloud preserves omitted and clears explicit-null updated_by_user_id", (t) => {
   const db = createDb(t);
   if (!db) return;
   const privateId = db.getPrivateSpaceId();
@@ -324,13 +416,24 @@ test("upsertNoteFromCloud round-trips updated_by_user_id", (t) => {
   );
   assert.equal(updated.updated_by_user_id, "user-b");
 
-  // A pull without the field must keep the last known editor.
+  const cloudNoteWithoutUpdater = { ...cloudNote };
+  delete cloudNoteWithoutUpdater.updated_by_user_id;
+
+  // Older API responses that omit the field must keep the last known editor.
   const unchanged = db.upsertNoteFromCloud(
-    { ...cloudNote, updated_by_user_id: null, updated_at: "2026-07-03 10:00:00" },
+    { ...cloudNoteWithoutUpdater, updated_at: "2026-07-03 10:00:00" },
     null,
     privateId
   );
   assert.equal(unchanged.updated_by_user_id, "user-b");
+
+  // Explicit null clears attribution after the former user is deleted.
+  const cleared = db.upsertNoteFromCloud(
+    { ...cloudNote, updated_by_user_id: null, updated_at: "2026-07-04 10:00:00" },
+    null,
+    privateId
+  );
+  assert.equal(cleared.updated_by_user_id, null);
 });
 
 // Container conversations die with their container (space purge, folder
@@ -699,6 +802,7 @@ test("denied folder delete restores the same notes, speakers, and conversations 
 
   db.db.close();
   db = new DatabaseManager();
+  db.setActiveAccountId("test-account");
   const restored = db.restoreFolderAfterDeniedDelete(folder.id);
   assert.equal(restored.success, true);
   assert.equal(restored.folder.id, folder.id);
@@ -906,6 +1010,150 @@ test("confirmed folder delete scrubs chats and finalizes held rows", (t) => {
   assert.ok(acceptedDeleteIds.has(acceptedConv.id));
   assert.ok(acceptedDeleteIds.has(acceptedPredeleted.id));
 });
+
+for (const destination of ["personal", "team"]) {
+  test(`moveFolderToSpace preserves folder chats when moving to ${destination}`, (t) => {
+    const db = createDb(t);
+    if (!db) return;
+    t.after(() => db.db.close());
+    const source = createTestTeamSpace(db, { name: "Source" }).space;
+    const destinationId =
+      destination === "personal"
+        ? db.getPrivateSpaceId()
+        : createTestTeamSpace(db, { name: "Destination" }).space.id;
+    const folder = db.createFolder("Moved", source.id).folder;
+    const chat = db.createAgentConversation("Moved chat", null, source.id, folder.id);
+    db.addAgentMessage(chat.id, "user", "Keep this history");
+    const messages = db.getAgentMessages(chat.id);
+    const stationary = db.createAgentConversation("Source chat", null, source.id);
+    db.addAgentMessage(stationary.id, "user", "Retire this history");
+    const privateChat = db.createAgentConversation("Private chat");
+
+    const moved = db.moveFolderToSpace(folder.id, destinationId);
+    assert.equal(moved.success, true);
+    assert.equal(moved.folder.space_id, destinationId);
+    assert.equal(db.getAgentConversation(chat.id).space_id, destinationId);
+    assert.deepEqual(
+      db.getConversationsForContainer(destinationId, folder.id).map((row) => row.id),
+      [chat.id]
+    );
+
+    assert.equal(db.purgeSpace(source.id).success, true);
+    assert.equal(db.getAgentConversation(chat.id).space_id, destinationId);
+    assert.deepEqual(db.getAgentMessages(chat.id), messages);
+    assert.deepEqual(
+      db.getConversationsForContainer(destinationId, folder.id).map((row) => row.id),
+      [chat.id]
+    );
+    assert.equal(db.getAgentConversation(stationary.id), null);
+    assert.deepEqual(db.getAgentMessages(stationary.id), []);
+    assert.ok(db.getAgentConversation(privateChat.id));
+  });
+}
+
+test("failed and unchanged folder moves preserve chat ownership and history", (t) => {
+  const db = createDb(t);
+  if (!db) return;
+  t.after(() => db.db.close());
+  const source = createTestTeamSpace(db, { name: "Source" }).space;
+  const destination = createTestTeamSpace(db, { name: "Destination" }).space;
+  const folder = db.createFolder("Docs", source.id).folder;
+  db.createFolder("Docs", destination.id);
+  const chat = db.createAgentConversation("Docs chat", null, source.id, folder.id);
+  db.addAgentMessage(chat.id, "user", "Keep this history");
+  const before = db.getAgentConversation(chat.id);
+  const messages = db.getAgentMessages(chat.id);
+
+  assert.equal(db.moveFolderToSpace(folder.id, source.id).success, true);
+  assert.equal(db.moveFolderToSpace(folder.id, destination.id).success, false);
+  assert.deepEqual(db.getAgentConversation(chat.id), before);
+  assert.deepEqual(db.getAgentMessages(chat.id), messages);
+});
+
+function createMovedFolderChat(db) {
+  const source = createTestTeamSpace(db, { name: "Source" }).space;
+  const destination = createTestTeamSpace(db, { name: "Destination" }).space;
+  const folder = db.createFolder("Moved", source.id).folder;
+  db.markFolderSynced(folder.id, "cloud-folder-moved");
+  const chat = db.createAgentConversation("Moved chat", null, source.id, folder.id);
+  db.addAgentMessage(chat.id, "user", "Keep this history");
+  const sourceRootChat = db.createAgentConversation("Source chat", null, source.id);
+  return { source, destination, folder, chat, sourceRootChat };
+}
+
+test("a folder moved by a pull keeps its chats when the old space is purged", (t) => {
+  const db = createDb(t);
+  if (!db) return;
+  t.after(() => db.db.close());
+  const { source, destination, folder, chat, sourceRootChat } = createMovedFolderChat(db);
+  const messages = db.getAgentMessages(chat.id);
+
+  db.upsertFolderFromCloud(
+    {
+      id: "cloud-folder-moved",
+      client_folder_id: folder.client_folder_id,
+      name: folder.name,
+      created_at: folder.created_at,
+      updated_at: new Date().toISOString(),
+    },
+    destination.id
+  );
+  assert.equal(db.getAgentConversation(chat.id).space_id, destination.id);
+
+  assert.equal(db.purgeSpace(source.id).success, true);
+  assert.deepEqual(db.getAgentMessages(chat.id), messages);
+  assert.deepEqual(
+    db.getConversationsForContainer(destination.id, folder.id).map((row) => row.id),
+    [chat.id]
+  );
+  assert.equal(db.getAgentConversation(sourceRootChat.id), null);
+
+  assert.equal(db.purgeSpace(destination.id).success, true);
+  assert.equal(db.getAgentConversation(chat.id), null);
+  assert.deepEqual(db.getAgentMessages(chat.id), []);
+});
+
+for (const mode of ["preserve-dirty", "destructive"]) {
+  test(`${mode} purge matches folder chats through their folder, not a stale space_id`, (t) => {
+    const db = createDb(t);
+    if (!db) return;
+    t.after(() => db.db.close());
+    const { source, destination, folder, chat, sourceRootChat } = createMovedFolderChat(db);
+    const sourceNote = db.saveNote(
+      "Source note",
+      "body",
+      "personal",
+      null,
+      null,
+      null,
+      source.id
+    ).note;
+    db.markNoteSynced(sourceNote.id, "cloud-source-note");
+    const sourceNoteChat = db.createAgentConversation("Source note chat", sourceNote.id);
+    assert.equal(db.moveFolderToSpace(folder.id, destination.id).success, true);
+    // Folders moved before chats followed them still carry the old space.
+    db.db
+      .prepare("UPDATE agent_conversations SET space_id = ? WHERE id = ?")
+      .run(source.id, chat.id);
+    const messages = db.getAgentMessages(chat.id);
+
+    assert.equal(db.purgeSpace(source.id, { mode }).success, true);
+    assert.deepEqual(db.getAgentMessages(chat.id), messages);
+    assert.deepEqual(
+      db.getConversationsForContainer(destination.id, folder.id).map((row) => row.id),
+      [chat.id]
+    );
+    assert.equal(db.getAgentConversation(sourceRootChat.id), null);
+    assert.equal(db.getAgentConversation(sourceNoteChat.id), null);
+
+    assert.equal(db.purgeSpace(destination.id, { mode }).success, true);
+    assert.equal(
+      db.db.prepare("SELECT COUNT(*) AS n FROM agent_conversations WHERE id = ?").get(chat.id).n,
+      0
+    );
+    assert.deepEqual(db.getAgentMessages(chat.id), []);
+  });
+}
 
 test("relocateRevokedFolder moves or retires the folder's conversations", (t) => {
   const db = createDb(t);

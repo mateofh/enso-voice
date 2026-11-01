@@ -1,26 +1,52 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Copy,
+  CopyRounded,
   Check,
   Search,
   FileText,
   ChevronDown,
   ChevronRight,
   CircleAlert,
-} from "lucide-react";
+} from "../icons";
 import { cn } from "../lib/utils";
 import { MarkdownRenderer } from "../ui/MarkdownRenderer";
-import type { ToolCallInfo } from "./types";
+import { TechnicalErrorDetails } from "../ui/TechnicalErrorDetails";
+import { openProviderSettings } from "../../utils/describeProviderError";
+import type { MessageError, ToolCallInfo } from "./types";
 import { extractNoteCards } from "./noteCards";
+import { helpAnswerPlainText } from "./helpEvidenceText";
+import { HelpEvidence } from "./GroundedHelpEvidence";
+import { extractHelpEvidence } from "./helpEvidence";
 import { toolIcons } from "./toolIcons";
+import { ApprovalCard } from "./ApprovalCard";
+import { SkillApprovalCard, SkillCardSummary } from "./SkillApprovalCard";
+import { readSkillCardRecord, SKILL_CARD_TOOLS } from "./skillCardRecord";
+import { CodeBlockActions } from "./CodeBlockActions";
+import { approvalKey, useConnectorApprovalStore } from "../../stores/connectorApprovalStore";
+import { useSkillApprovalStore } from "../../stores/skillApprovalStore";
+import { loadSkillTarget } from "../../utils/skillContext";
+
+// A skill card stands in for its step: once the call is over, a call that showed no card
+// (the proposal went back to the model to fix) leaves nothing behind.
+const showsNothing = (toolCall: ToolCallInfo): boolean =>
+  SKILL_CARD_TOOLS.has(toolCall.name) &&
+  toolCall.status !== "executing" &&
+  !readSkillCardRecord(toolCall);
+
+// Module-level, so the markdown keeps the same callback from render to render.
+const copyCodeBlock = (code: string) => <CodeBlockActions code={code} />;
 
 interface ChatMessageProps {
+  messageId: string;
   role: "user" | "assistant";
   content: string;
   isStreaming: boolean;
   toolCalls?: ToolCallInfo[];
+  error?: MessageError;
   onOpenNote?: (noteId: number) => void;
+  plain?: boolean;
 }
 
 function ToolCallStep({ toolCall }: { toolCall: ToolCallInfo }) {
@@ -31,6 +57,19 @@ function ToolCallStep({ toolCall }: { toolCall: ToolCallInfo }) {
   const isError = toolCall.status === "error";
   const isCompleted = toolCall.status === "completed";
   const isClipboard = toolCall.name === "copy_to_clipboard" && isCompleted;
+  // A loaded skill's result is its name; a failed load's is the error, so its step names the
+  // skill the call asked for. Both are labelled in the current language.
+  const skillName =
+    toolCall.name === "load_skill" && isCompleted
+      ? toolCall.failed
+        ? loadSkillTarget(toolCall.arguments)?.name
+        : toolCall.result
+      : undefined;
+  const label = skillName
+    ? t(toolCall.failed ? "skills.chat.usingSkillFailed" : "skills.chat.usingSkill", {
+        name: skillName,
+      })
+    : toolCall.result || toolCall.name;
 
   const resultLines = toolCall.result?.split("\n") ?? [];
   const hasDetail = resultLines.length > 1 && !isClipboard;
@@ -39,11 +78,11 @@ function ToolCallStep({ toolCall }: { toolCall: ToolCallInfo }) {
     <div
       className={cn(
         "relative rounded-md mb-1 overflow-hidden",
-        "border-l-2 transition-colors duration-300",
-        isExecuting && "border-l-primary/60",
-        isCompleted && !isError && "border-l-muted-foreground/20",
-        isClipboard && "border-l-emerald-500/50",
-        isError && "border-l-destructive/50"
+        "border-s-2 transition-colors duration-300",
+        isExecuting && "border-s-primary/60",
+        isCompleted && !isError && "border-s-muted-foreground/20",
+        isClipboard && "border-s-emerald-500/50",
+        isError && "border-s-destructive/50"
       )}
     >
       {isExecuting && (
@@ -66,7 +105,7 @@ function ToolCallStep({ toolCall }: { toolCall: ToolCallInfo }) {
           className={cn(
             "shrink-0 transition-colors duration-300",
             isExecuting && "text-primary/70",
-            isCompleted && !isError && !isClipboard && "text-muted-foreground/50",
+            isCompleted && !isError && !isClipboard && "text-muted-foreground/70",
             isClipboard && "text-emerald-500/70",
             isError && "text-destructive/60"
           )}
@@ -95,16 +134,14 @@ function ToolCallStep({ toolCall }: { toolCall: ToolCallInfo }) {
             />
           </div>
         ) : (
-          <span className="text-[11px] text-muted-foreground/70">
-            {toolCall.result || toolCall.name}
-          </span>
+          <span className="text-[11px] text-muted-foreground/70">{label}</span>
         )}
 
         {hasDetail && !isExecuting && (
           <ChevronDown
             size={10}
             className={cn(
-              "ml-auto text-muted-foreground/40 shrink-0 transition-transform duration-200",
+              "ms-auto text-muted-foreground/70 shrink-0 transition-transform duration-200",
               expanded && "rotate-180"
             )}
           />
@@ -116,13 +153,31 @@ function ToolCallStep({ toolCall }: { toolCall: ToolCallInfo }) {
           className="overflow-hidden transition-all duration-200"
           style={{ maxHeight: expanded ? `${resultLines.length * 16 + 12}px` : "0px" }}
         >
-          <pre className="text-[10px] text-muted-foreground/60 px-2.5 pb-1.5 whitespace-pre-wrap leading-tight">
+          <pre
+            dir="ltr"
+            className="text-[10px] text-muted-foreground/70 px-2.5 pb-1.5 whitespace-pre-wrap leading-tight"
+          >
             {toolCall.result}
           </pre>
         </div>
       )}
     </div>
   );
+}
+
+// Subscribes to its own approval entry only, so editing one card doesn't
+// re-render every message in the thread.
+function ToolCallItem({ messageId, toolCall }: { messageId: string; toolCall: ToolCallInfo }) {
+  const key = approvalKey(messageId, toolCall.id);
+  const approval = useConnectorApprovalStore((state) => state.entries[key]);
+  const skillApproval = useSkillApprovalStore((state) => state.entries[key]);
+  if (approval) return <ApprovalCard entry={approval} />;
+  if (skillApproval) return <SkillApprovalCard entry={skillApproval} />;
+  // A reopened chat has no live card, only the outcome the call saved.
+  const skillRecord = readSkillCardRecord(toolCall);
+  if (skillRecord) return <SkillCardSummary record={skillRecord} />;
+  if (showsNothing(toolCall)) return null;
+  return <ToolCallStep toolCall={toolCall} />;
 }
 
 function NoteCard({
@@ -147,37 +202,48 @@ function NoteCard({
         "hover:bg-primary/10 hover:border-primary/20",
         "active:scale-[0.99]",
         "transition-all duration-150",
-        "text-left group/note"
+        "text-start group/note"
       )}
     >
       <div className={cn("shrink-0 p-1 rounded", "bg-primary/10")}>
         <FileText size={12} className="text-primary/70" />
       </div>
       <div className="min-w-0 flex-1">
-        <p className="text-[12px] font-medium text-foreground truncate">{title}</p>
-        <p className="text-[10px] text-muted-foreground/50">{t("agentMode.tools.openNote")}</p>
+        <p dir="auto" className="text-[12px] font-medium text-foreground truncate">
+          {title}
+        </p>
+        <p className="text-[10px] text-muted-foreground/70">{t("agentMode.tools.openNote")}</p>
       </div>
       <ChevronRight
         size={12}
-        className="text-muted-foreground/30 group-hover/note:text-primary/50 shrink-0 transition-colors duration-150"
+        className="text-muted-foreground/70 group-hover/note:text-primary/50 shrink-0 transition-colors duration-150 rtl:rotate-180"
       />
     </button>
   );
 }
 
-export function ChatMessage({
+// Memoized: hosts re-render on every keystroke in their composer (or, for note chat, in
+// the note), and only the streaming reply's props change between those renders.
+export const ChatMessage = memo(function ChatMessage({
+  messageId,
   role,
   content,
   isStreaming,
   toolCalls,
+  error,
   onOpenNote,
+  plain = false,
 }: ChatMessageProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [copied, setCopied] = useState(false);
+
+  const helpEvidence = role === "assistant" ? extractHelpEvidence(toolCalls) : null;
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(content);
+      await navigator.clipboard.writeText(
+        helpAnswerPlainText(content, helpEvidence, t, i18n?.resolvedLanguage)
+      );
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -194,18 +260,24 @@ export function ChatMessage({
         <div
           data-chat-bubble
           className={cn(
-            "max-w-[80%] px-3 py-2 rounded-lg rounded-br-sm",
-            "bg-primary/90 text-primary-foreground",
-            "text-[13px] leading-relaxed"
+            "max-w-[80%] text-[13px] leading-relaxed",
+            plain
+              ? "rounded-2xl rounded-ee-md bg-foreground/[0.07] px-3.5 py-2 text-foreground shadow-[inset_0_1px_0_rgb(255_255_255/0.5)] dark:bg-white/[0.09] dark:shadow-[inset_0_1px_0_rgb(255_255_255/0.06)]"
+              : "rounded-lg rounded-ee-sm bg-primary/90 px-3 py-2 text-primary-foreground"
           )}
         >
-          {content}
+          <span dir="auto" className="whitespace-pre-wrap">
+            {content}
+          </span>
         </div>
       </div>
     );
   }
 
-  const hasToolCalls = toolCalls && toolCalls.length > 0;
+  const visibleToolCalls = toolCalls?.filter(
+    (tc) => tc.name !== "grounded_product_help" && !showsNothing(tc)
+  );
+  const hasToolCalls = visibleToolCalls && visibleToolCalls.length > 0;
   const hasContent = content.length > 0;
   const noteCards = extractNoteCards(toolCalls, t("notes.list.untitledNote"));
 
@@ -217,19 +289,20 @@ export function ChatMessage({
       <div
         data-chat-bubble
         className={cn(
-          "max-w-[85%] px-3 py-2 rounded-lg rounded-bl-sm",
-          "bg-surface-1 border border-border/30 text-foreground",
-          "text-[13px] leading-relaxed"
+          "text-[13px] leading-relaxed text-foreground",
+          plain
+            ? "max-w-full px-1 py-1"
+            : "max-w-[85%] rounded-lg rounded-es-sm border border-border/70 bg-surface-1 px-3 py-2"
         )}
       >
         {hasToolCalls && (
           <div
             className={cn(
-              (hasContent || noteCards.length > 0) && "mb-2 pb-1.5 border-b border-border/15"
+              (hasContent || noteCards.length > 0) && "mb-2 pb-1.5 border-b border-border/70"
             )}
           >
-            {toolCalls.map((tc) => (
-              <ToolCallStep key={tc.id} toolCall={tc} />
+            {visibleToolCalls.map((tc) => (
+              <ToolCallItem key={tc.id} messageId={messageId} toolCall={tc} />
             ))}
           </div>
         )}
@@ -238,12 +311,15 @@ export function ChatMessage({
           <MarkdownRenderer
             content={content}
             className="text-[13px] leading-relaxed [&_p]:text-[13px] [&_li]:text-[13px]"
+            codeBlockActions={copyCodeBlock}
           />
         )}
 
+        {helpEvidence && <HelpEvidence evidence={helpEvidence} />}
+
         {isStreaming && hasContent && (
           <span
-            className="inline-block w-[2px] h-[14px] bg-foreground/70 align-middle ml-0.5"
+            className="inline-block w-[2px] h-[14px] bg-foreground/70 align-middle ms-0.5"
             style={{ animation: "agent-cursor-blink 1s ease-in-out infinite" }}
           />
         )}
@@ -253,6 +329,17 @@ export function ChatMessage({
             {t("agentMode.input.thinking")}...
           </span>
         )}
+
+        {error?.settingsTarget && (
+          <button
+            type="button"
+            onClick={() => openProviderSettings(error.settingsTarget!)}
+            className="mt-1.5 text-xs font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded-sm"
+          >
+            {t("providerErrors.openSettings")}
+          </button>
+        )}
+        {error?.technicalDetails && <TechnicalErrorDetails details={error.technicalDetails} />}
 
         {noteCards.length > 0 && !isStreaming && (
           <div>
@@ -268,21 +355,31 @@ export function ChatMessage({
         )}
 
         {hasContent && !isStreaming && (
-          <div className="flex justify-start mt-1.5 -mb-0.5">
+          <div className={cn("flex justify-start mt-1.5", !plain && "-mb-0.5")}>
             <button
+              type="button"
               onClick={handleCopy}
+              aria-label={t(copied ? "common.copied" : "common.copy")}
+              title={t(copied ? "common.copied" : "common.copy")}
               className={cn(
-                "p-1 rounded-sm",
-                "text-muted-foreground/40 hover:text-foreground hover:bg-foreground/8",
-                "opacity-0 group-hover/msg:opacity-100 transition-all duration-150",
+                plain
+                  ? // Always there in the note chat, not only on hover.
+                    "flex size-7 items-center justify-center rounded-full text-foreground/45 hover:bg-foreground/[0.07] hover:text-foreground dark:hover:bg-white/[0.08] transition-colors duration-150"
+                  : "p-1 rounded-sm text-muted-foreground/70 hover:text-foreground hover:bg-foreground/8 opacity-0 group-hover/msg:opacity-100 transition-all duration-150",
                 "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring/30"
               )}
             >
-              {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+              {copied ? (
+                <Check size={plain ? 15 : 12} className="text-emerald-500" />
+              ) : plain ? (
+                <CopyRounded size={15} />
+              ) : (
+                <Copy size={12} />
+              )}
             </button>
           </div>
         )}
       </div>
     </div>
   );
-}
+});

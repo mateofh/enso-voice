@@ -33,6 +33,149 @@ async function connectPreconfigured(streaming, socket) {
   await connected;
 }
 
+const sentEvents = (socket, type) =>
+  socket.sent.map((raw) => JSON.parse(raw)).filter((e) => e.type === type);
+
+async function connectByok(streaming, socket, options) {
+  const connected = streaming.connect({
+    apiKey: "sk-test",
+    createSocket: async () => socket,
+    ...options,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.readyState = WS.OPEN;
+  socket.emit("message", JSON.stringify({ type: "session.created" }));
+  socket.emit("message", JSON.stringify({ type: "session.updated" }));
+  await connected;
+}
+
+function captureLogs(t) {
+  const debugLogger = require("../../src/helpers/debugLogger");
+  const entries = [];
+  for (const level of ["debug", "warn", "error"]) {
+    const original = debugLogger[level];
+    debugLogger[level] = (message, meta) => entries.push({ level, message, meta });
+    t.after(() => {
+      debugLogger[level] = original;
+    });
+  }
+  return entries;
+}
+
+test("managed realtime diagnostics are private while personal diagnostics remain available", async (t) => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const entries = captureLogs(t);
+  const marker = "injected-sensitive-realtime-diagnostic";
+  for (const mode of ["enterprise", "byok"]) {
+    entries.length = 0;
+    const streaming = new OpenAIRealtimeStreaming();
+    const socket = makeFakeSocket(WS.CONNECTING);
+    const errors = [];
+    const expired = [];
+    streaming.onError = (error) => errors.push(error.message);
+    streaming.onConnectionLost = (error) => errors.push(error.message);
+    streaming.onSessionExpired = (event) => expired.push(event);
+    await connectByok(streaming, socket, { mode });
+    socket.emit(
+      "message",
+      JSON.stringify({ type: "error", error: { code: marker, message: marker } })
+    );
+    socket.emit(
+      "message",
+      JSON.stringify({
+        type: "conversation.item.input_audio_transcription.failed",
+        error: { message: marker },
+      })
+    );
+    socket.emit("message", marker);
+    socket.emit(
+      "message",
+      JSON.stringify({ type: "error", error: { code: "session_expired", message: marker } })
+    );
+    assert.deepEqual(expired, [{ proactive: false }]);
+    socket.emit("error", new Error(marker));
+    socket.emit("close", 1000, Buffer.from(marker));
+    assert.equal(errors.length, 2);
+    assert.equal(JSON.stringify({ entries, errors }).includes(marker), mode === "byok");
+    if (mode === "enterprise") assert.ok(errors.every((message) => !message.includes(marker)));
+    await streaming.disconnect();
+  }
+});
+
+test(
+  "managed empty commits still settle stop without exposing the provider message",
+  { timeout: 1000 },
+  async (t) => {
+    const OpenAIRealtimeStreaming = (await load()).default;
+    const entries = captureLogs(t);
+    const streaming = new OpenAIRealtimeStreaming();
+    const socket = makeFakeSocket(WS.CONNECTING);
+    await connectByok(streaming, socket, { mode: "enterprise" });
+    streaming.sendAudio(Buffer.from([1, 2]));
+    const errors = [];
+    streaming.onError = (error) => errors.push(error);
+    const send = socket.send;
+    socket.send = (data) => {
+      send(data);
+      if (JSON.parse(data).type === "input_audio_buffer.commit")
+        socket.emit(
+          "message",
+          JSON.stringify({
+            type: "error",
+            error: {
+              code: "input_audio_buffer_commit_empty",
+              message: "sensitive-empty-commit-diagnostic",
+            },
+          })
+        );
+    };
+    await streaming.disconnect();
+    assert.deepEqual(errors, []);
+    assert.equal(JSON.stringify(entries).includes("sensitive-empty-commit-diagnostic"), false);
+  }
+);
+
+test("managed socket setup redacts raw failures and retains keyed application refusals", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  for (const keyed of [false, true]) {
+    const streaming = new OpenAIRealtimeStreaming();
+    const failure = Object.assign(
+      new Error(keyed ? "Configuration changed" : "sensitive-setup-diagnostic"),
+      keyed ? { code: "MANAGED_CONFIG_CHANGED", messageKey: "common.managedConfigUnavailable" } : {}
+    );
+    await assert.rejects(
+      streaming.connect({
+        mode: "enterprise",
+        createSocket: async () => {
+          throw failure;
+        },
+      }),
+      (error) => {
+        if (keyed) assert.equal(error, failure);
+        else assert.equal(error.message.includes("sensitive-setup-diagnostic"), false);
+        return true;
+      }
+    );
+  }
+});
+
+test("managed handshake authentication failures retain the safe setup classification", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const { safeCheckCode } = require("../../src/helpers/enterpriseAudioSetup");
+  for (const status of [401, 403]) {
+    const streaming = new OpenAIRealtimeStreaming();
+    const socket = makeFakeSocket(WS.CONNECTING);
+    const pending = streaming.connect({ mode: "enterprise", createSocket: async () => socket });
+    await new Promise(setImmediate);
+    socket.emit("error", new Error(`Unexpected server response: ${status}`));
+    await assert.rejects(pending, (error) => {
+      assert.equal(error.code, "MANAGED_AUTH_REJECTED");
+      assert.equal(safeCheckCode(error), "AUTH_REJECTED");
+      return true;
+    });
+  }
+});
+
 test("sendAudio buffers frames arriving before the socket exists (token-fetch window)", async () => {
   const OpenAIRealtimeStreaming = (await load()).default;
   const streaming = new OpenAIRealtimeStreaming();
@@ -517,4 +660,766 @@ test("completedSegments accumulate across turns", async () => {
 
   assert.equal(streaming.completedSegments.length, 2);
   assert.equal(lastFull, "Hello world How are you");
+});
+
+test("BYOK session.update is byte-for-byte today's payload when no VAD/language/noise options are passed", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+
+  const connected = streaming.connect({
+    apiKey: "sk-test",
+    model: "gpt-4o-mini-transcribe",
+    // keyterms stay ignored: the dictionary has no realtime channel yet.
+    keyterms: ["OpenWhispr"],
+    sampleRate: 24000,
+    createSocket: async () => socket,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.readyState = WS.OPEN;
+  socket.emit("message", JSON.stringify({ type: "session.created" }));
+
+  const updates = socket.sent
+    .map((raw) => JSON.parse(raw))
+    .filter((e) => e.type === "session.update");
+  assert.equal(updates.length, 1, "exactly one session.update after session.created");
+  assert.deepEqual(updates[0], {
+    type: "session.update",
+    session: {
+      type: "transcription",
+      audio: {
+        input: {
+          format: { type: "audio/pcm", rate: 24000 },
+          transcription: { model: "gpt-4o-mini-transcribe" },
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.6,
+            silence_duration_ms: 600,
+            prefix_padding_ms: 500,
+          },
+        },
+      },
+    },
+  });
+
+  socket.emit("message", JSON.stringify({ type: "session.updated" }));
+  await connected;
+  streaming.cleanup();
+});
+
+// -- #2050: the dictation language reaches the BYOK transcription config --
+
+test("BYOK session.update pins the dictation language the caller selected (#2050)", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, socket, { model: "gpt-4o-mini-transcribe", language: "de" });
+
+  const [update] = sentEvents(socket, "session.update");
+  assert.deepEqual(update.session.audio.input.transcription, {
+    model: "gpt-4o-mini-transcribe",
+    language: "de",
+  });
+  streaming.cleanup();
+});
+
+test("BYOK session.update sends the base ISO-639-1 code and omits language for auto/blank", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const cases = [
+    ["zh-TW", "zh"],
+    [" PT ", "pt"],
+    ["auto", undefined],
+    ["", undefined],
+    [undefined, undefined],
+  ];
+  for (const [language, expected] of cases) {
+    const streaming = new OpenAIRealtimeStreaming();
+    const socket = makeFakeSocket(WS.CONNECTING);
+    await connectByok(streaming, socket, { model: "gpt-4o-mini-transcribe", language });
+
+    const [update] = sentEvents(socket, "session.update");
+    assert.equal(update.session.audio.input.transcription.language, expected, String(language));
+    assert.equal(
+      "language" in update.session.audio.input.transcription,
+      expected !== undefined,
+      `${String(language)} must not leave a language key on the wire`
+    );
+    streaming.cleanup();
+  }
+});
+
+test("a later connect() without a language does not inherit the previous session's pin", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const first = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, first, { model: "gpt-4o-mini-transcribe", language: "de" });
+  streaming.cleanup();
+
+  const second = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, second, { model: "gpt-4o-mini-transcribe" });
+  const [update] = sentEvents(second, "session.update");
+  assert.equal("language" in update.session.audio.input.transcription, false);
+  streaming.cleanup();
+});
+
+test("BYOK session.update is byte-for-byte the overridden payload when vadThreshold is passed (system socket)", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+
+  const connected = streaming.connect({
+    apiKey: "sk-test",
+    model: "gpt-4o-mini-transcribe",
+    streamLabel: "system",
+    vadThreshold: 0.3,
+    createSocket: async () => socket,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.readyState = WS.OPEN;
+  socket.emit("message", JSON.stringify({ type: "session.created" }));
+
+  const updates = socket.sent
+    .map((raw) => JSON.parse(raw))
+    .filter((e) => e.type === "session.update");
+  assert.equal(updates.length, 1, "exactly one session.update after session.created");
+  assert.deepEqual(updates[0], {
+    type: "session.update",
+    session: {
+      type: "transcription",
+      audio: {
+        input: {
+          format: { type: "audio/pcm", rate: 24000 },
+          transcription: { model: "gpt-4o-mini-transcribe" },
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.3,
+            silence_duration_ms: 600,
+            prefix_padding_ms: 500,
+          },
+        },
+      },
+    },
+  });
+
+  socket.emit("message", JSON.stringify({ type: "session.updated" }));
+  await connected;
+  streaming.cleanup();
+});
+
+test("dictation-style connect (inputRate 16000, custom socket factory) declares the 16kHz format and the same VAD", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  const factoryCalls = [];
+
+  const connected = streaming.connect({
+    apiKey: "tk-secret",
+    model: "voxtral-mini-4b-realtime",
+    inputRate: 16000,
+    createSocket: () => {
+      factoryCalls.push("called");
+      return Promise.resolve(socket);
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.readyState = WS.OPEN;
+  socket.emit("message", JSON.stringify({ type: "session.created" }));
+
+  const [update] = socket.sent
+    .map((raw) => JSON.parse(raw))
+    .filter((e) => e.type === "session.update");
+  assert.equal(factoryCalls.length, 1);
+  assert.deepEqual(update.session.audio.input.format, { type: "audio/pcm", rate: 16000 });
+  assert.equal(update.session.audio.input.transcription.model, "voxtral-mini-4b-realtime");
+  assert.deepEqual(update.session.audio.input.turn_detection, {
+    type: "server_vad",
+    threshold: 0.6,
+    silence_duration_ms: 600,
+    prefix_padding_ms: 500,
+  });
+  assert.equal("noise_reduction" in update.session.audio.input, false);
+  assert.equal("language" in update.session.audio.input.transcription, false);
+
+  socket.emit("message", JSON.stringify({ type: "session.updated" }));
+  await connected;
+  streaming.cleanup();
+});
+
+test("a final that lands during disconnect()'s commit window reaches onFinalTranscript with its timestamp", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectPreconfigured(streaming, socket);
+
+  const calls = [];
+  streaming.onFinalTranscript = (text, timestamp) => calls.push({ text, timestamp });
+  streaming.sendAudio(Buffer.alloc(1600, 1)); // audioBytesSent > 0 so disconnect() commits
+
+  const disconnecting = streaming.disconnect();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const commits = socket.sent
+    .filter((raw) => typeof raw === "string")
+    .map((raw) => JSON.parse(raw))
+    .filter((e) => e.type === "input_audio_buffer.commit");
+  assert.equal(commits.length, 1, "disconnect() commits the trailing buffer");
+
+  socket.emit("message", JSON.stringify({ type: "input_audio_buffer.speech_started" }));
+  socket.emit(
+    "message",
+    JSON.stringify({
+      type: "conversation.item.input_audio_transcription.completed",
+      transcript: "tail words",
+    })
+  );
+  const result = await disconnecting;
+
+  assert.equal(result.text, "tail words", "the tail is returned to the caller");
+  assert.equal(calls.length, 1, "the tail also reaches the live onFinalTranscript handler");
+  assert.equal(calls[0].text, "tail words");
+  assert.equal(typeof calls[0].timestamp, "number");
+});
+
+// -- diagnostic logging: stream labels, VAD events, failed/empty turns --
+
+test("transcription.failed is logged with the stream label and stays log-only (no onError, no segment)", async (t) => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  streaming.streamLabel = "system";
+  const logs = captureLogs(t);
+  let errorCalled = false;
+  streaming.onError = () => {
+    errorCalled = true;
+  };
+
+  streaming.handleMessage(
+    JSON.stringify({
+      type: "conversation.item.input_audio_transcription.failed",
+      item_id: "item_1",
+      error: { code: "audio_unintelligible", message: "audio too noisy" },
+    })
+  );
+
+  const line = logs.find((entry) => entry.message.includes("turn transcription failed"));
+  assert.ok(line, "failed turn must produce a debug line");
+  assert.equal(line.level, "debug");
+  assert.equal(line.meta.stream, "system");
+  assert.equal(line.meta.itemId, "item_1");
+  assert.equal(line.meta.error, "audio too noisy");
+  assert.equal(errorCalled, false, "failed turns must not surface as errors");
+  assert.equal(streaming.completedSegments.length, 0, "failed turns must not count as segments");
+});
+
+test("empty-transcript completed events are logged and add no segment", async (t) => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  streaming.streamLabel = "system";
+  streaming.audioBytesSent = 4800;
+  const logs = captureLogs(t);
+  let finalCalled = false;
+  streaming.onFinalTranscript = () => {
+    finalCalled = true;
+  };
+
+  streaming.handleMessage(
+    JSON.stringify({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "item_2",
+      transcript: "   ",
+    })
+  );
+
+  const line = logs.find((entry) => entry.message.includes("turn completed with empty transcript"));
+  assert.ok(line, "empty completion must produce a debug line");
+  assert.equal(line.meta.stream, "system");
+  assert.equal(line.meta.itemId, "item_2");
+  assert.equal(line.meta.audioBytesSent, 4800);
+  assert.equal(finalCalled, false);
+  assert.equal(streaming.completedSegments.length, 0);
+});
+
+test("VAD events log first-3-then-every-50th with streamLabel and audioBytesSent", async (t) => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  streaming.streamLabel = "system";
+  streaming.audioBytesSent = 1234;
+  const logs = captureLogs(t);
+  const vadLines = () => logs.filter((entry) => entry.message.includes("VAD event"));
+
+  streaming.handleMessage(JSON.stringify({ type: "input_audio_buffer.speech_started" }));
+  streaming.handleMessage(JSON.stringify({ type: "input_audio_buffer.speech_stopped" }));
+  streaming.handleMessage(JSON.stringify({ type: "input_audio_buffer.committed" }));
+  assert.equal(vadLines().length, 3, "first 3 events all log");
+  assert.equal(vadLines()[0].meta.stream, "system");
+  assert.equal(vadLines()[0].meta.event, "input_audio_buffer.speech_started");
+  assert.equal(vadLines()[0].meta.audioBytesSent, 1234);
+
+  // Events 4..49 are throttled; the 50th logs again.
+  for (let i = 4; i <= 49; i++) {
+    streaming.handleMessage(JSON.stringify({ type: "input_audio_buffer.committed" }));
+  }
+  assert.equal(vadLines().length, 3, "events 4..49 stay silent");
+  streaming.handleMessage(JSON.stringify({ type: "input_audio_buffer.speech_started" }));
+  assert.equal(vadLines().length, 4, "the 50th event logs");
+  assert.equal(vadLines()[3].meta.count, 50);
+
+  assert.equal(streaming.speechStartedCount, 2, "only speech_started increments the counter");
+});
+
+test("disconnect summary carries streamLabel and speechStartedCount", async (t) => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  const connected = streaming.connect({
+    apiKey: "key",
+    preconfigured: true,
+    streamLabel: "system",
+    createSocket: async () => socket,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.readyState = WS.OPEN;
+  socket.emit("message", JSON.stringify({ type: "session.created" }));
+  await connected;
+
+  socket.emit("message", JSON.stringify({ type: "input_audio_buffer.speech_started" }));
+  socket.emit("message", JSON.stringify({ type: "input_audio_buffer.speech_started" }));
+
+  const logs = captureLogs(t);
+  await streaming.disconnect();
+
+  const line = logs.find((entry) => entry.message === "OpenAI Realtime disconnect");
+  assert.ok(line, "disconnect must log a summary");
+  assert.equal(line.meta.stream, "system");
+  assert.equal(line.meta.speechStartedCount, 2);
+  assert.equal(line.meta.segments, 0);
+  assert.equal(line.meta.audioBytesSent, 0);
+});
+
+test("preconfigured session.created echoes the server VAD config and format into the log", async (t) => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  const logs = captureLogs(t);
+
+  const connected = streaming.connect({
+    apiKey: "key",
+    preconfigured: true,
+    streamLabel: "system",
+    createSocket: async () => socket,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.readyState = WS.OPEN;
+  socket.emit(
+    "message",
+    JSON.stringify({
+      type: "session.created",
+      session: {
+        audio: {
+          input: {
+            format: { type: "audio/pcm", rate: 24000 },
+            turn_detection: { type: "server_vad", threshold: 0.5, silence_duration_ms: 600 },
+          },
+        },
+      },
+    })
+  );
+  await connected;
+
+  const lines = logs.filter((entry) => entry.message.includes("session created (preconfigured)"));
+  assert.equal(lines.length, 1, "server config echo logs once per socket");
+  assert.equal(lines[0].meta.stream, "system");
+  assert.deepEqual(lines[0].meta.turnDetection, {
+    type: "server_vad",
+    threshold: 0.5,
+    silence_duration_ms: 600,
+  });
+  assert.deepEqual(lines[0].meta.inputFormat, { type: "audio/pcm", rate: 24000 });
+  streaming.cleanup();
+});
+
+test("without a streamLabel (dictation) log metadata carries no stream key", async (t) => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const logs = captureLogs(t);
+
+  await streaming.disconnect();
+
+  const line = logs.find((entry) => entry.message === "OpenAI Realtime disconnect");
+  assert.ok(line);
+  assert.equal("stream" in line.meta, false, "unlabelled sockets keep today's metadata shape");
+});
+
+// -- gpt-live-transcribe: no server VAD, the client commits the turn on stop --
+
+const LIVE_UPDATE_BODY = {
+  type: "session.update",
+  session: {
+    type: "transcription",
+    audio: {
+      input: {
+        format: { type: "audio/pcm", rate: 24000 },
+        transcription: { model: "gpt-live-transcribe" },
+        turn_detection: null,
+      },
+    },
+  },
+};
+
+const completedEvent = (transcript) =>
+  JSON.stringify({
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: "item_1",
+    transcript,
+  });
+
+test("gpt-live-transcribe session.update sends turn_detection: null (any VAD config is rejected); the rest is the legacy payload", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, socket, { model: "gpt-live-transcribe", vadThreshold: 0.3 });
+
+  const updates = sentEvents(socket, "session.update");
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0], LIVE_UPDATE_BODY);
+  assert.ok(socket.sent[0].includes('"turn_detection":null'), "null is on the wire, not dropped");
+  streaming.cleanup();
+});
+
+test("legacy models keep the server_vad block byte-for-byte", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  for (const model of ["gpt-4o-mini-transcribe", "gpt-4o-transcribe"]) {
+    const streaming = new OpenAIRealtimeStreaming();
+    const socket = makeFakeSocket(WS.CONNECTING);
+    await connectByok(streaming, socket, { model });
+
+    const [update] = sentEvents(socket, "session.update");
+    assert.equal(update.session.audio.input.transcription.model, model);
+    assert.deepEqual(
+      update.session.audio.input.turn_detection,
+      { type: "server_vad", threshold: 0.6, silence_duration_ms: 600, prefix_padding_ms: 500 },
+      model
+    );
+    streaming.cleanup();
+  }
+});
+
+test("gpt-live-transcribe stop: disconnect() commits once, then consumes the .completed final it triggered", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, socket, { model: "gpt-live-transcribe" });
+  const partials = [];
+  const finals = [];
+  streaming.onPartialTranscript = (text) => partials.push(text);
+  streaming.onFinalTranscript = (text, timestamp) => finals.push({ text, timestamp });
+
+  // Partials stream during speech with no speech_started/speech_stopped around them.
+  for (const delta of ["Hello", " world"]) {
+    socket.emit(
+      "message",
+      JSON.stringify({ type: "conversation.item.input_audio_transcription.delta", delta })
+    );
+  }
+  streaming.sendAudio(Buffer.alloc(4800, 1));
+
+  const disconnecting = streaming.disconnect();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sentEvents(socket, "input_audio_buffer.commit").length, 1);
+  assert.equal(finals.length, 0, "the final only exists once the server answers the commit");
+
+  socket.emit(
+    "message",
+    JSON.stringify({ type: "input_audio_buffer.committed", item_id: "item_1" })
+  );
+  socket.emit("message", completedEvent("Hello world."));
+  const result = await disconnecting;
+
+  assert.deepEqual(partials, ["Hello", "Hello world"]);
+  assert.equal(result.text, "Hello world.");
+  assert.deepEqual(
+    finals.map((f) => f.text),
+    ["Hello world."]
+  );
+  assert.equal(typeof finals[0].timestamp, "number", "timestamp falls back without speech_started");
+  assert.equal(streaming.speechStartedCount, 0);
+  assert.equal(
+    sentEvents(socket, "input_audio_buffer.commit").length,
+    1,
+    "still exactly one commit"
+  );
+  assert.equal(socket.readyState, WS.CLOSED);
+});
+
+test("gpt-live-transcribe stop with no audio sent never commits (an empty commit is a server error)", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, socket, { model: "gpt-live-transcribe" });
+
+  const result = await streaming.disconnect();
+
+  assert.equal(sentEvents(socket, "input_audio_buffer.commit").length, 0);
+  assert.equal(result.text, "");
+  assert.equal(socket.readyState, WS.CLOSED);
+});
+
+test("gpt-live-transcribe stop outlives the legacy 3 s commit budget; legacy keeps it", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  return (async () => {
+    const OpenAIRealtimeStreaming = (await load()).default;
+    const settle = async () => new Promise((resolve) => setImmediate(resolve));
+
+    const live = new OpenAIRealtimeStreaming();
+    const liveSocket = makeFakeSocket(WS.CONNECTING);
+    await connectByok(live, liveSocket, { model: "gpt-live-transcribe" });
+    live.sendAudio(Buffer.alloc(4800, 1));
+    let liveSettled = false;
+    const liveDisconnect = live.disconnect().then((result) => {
+      liveSettled = true;
+      return result;
+    });
+    await settle();
+    t.mock.timers.tick(3000);
+    await settle();
+    assert.equal(liveSettled, false, "a long dictation's final trails stop by more than 3 s");
+    liveSocket.emit("message", completedEvent("late tail"));
+    assert.equal((await liveDisconnect).text, "late tail");
+
+    const legacy = new OpenAIRealtimeStreaming();
+    const legacySocket = makeFakeSocket(WS.CONNECTING);
+    await connectByok(legacy, legacySocket, { model: "gpt-4o-mini-transcribe" });
+    legacy.sendAudio(Buffer.alloc(4800, 1));
+    let legacySettled = false;
+    const legacyDisconnect = legacy.disconnect().then(() => {
+      legacySettled = true;
+    });
+    await settle();
+    t.mock.timers.tick(3000);
+    await legacyDisconnect;
+    assert.equal(legacySettled, true);
+  })();
+});
+
+test("an empty or failed committed turn ends the stop wait at once instead of stalling for the budget", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const terminalEvents = [
+    completedEvent("   "),
+    JSON.stringify({
+      type: "conversation.item.input_audio_transcription.failed",
+      item_id: "item_1",
+      error: { code: "audio_unintelligible", message: "audio too noisy" },
+    }),
+  ];
+  for (const terminal of terminalEvents) {
+    const streaming = new OpenAIRealtimeStreaming();
+    const socket = makeFakeSocket(WS.CONNECTING);
+    await connectByok(streaming, socket, { model: "gpt-live-transcribe" });
+    let finalCalled = false;
+    streaming.onFinalTranscript = () => {
+      finalCalled = true;
+    };
+    streaming.sendAudio(Buffer.alloc(4800, 1));
+
+    const disconnecting = streaming.disconnect();
+    await new Promise((resolve) => setImmediate(resolve));
+    socket.emit("message", terminal);
+    const result = await Promise.race([
+      disconnecting,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("stop stalled")), 500)),
+    ]);
+
+    assert.equal(result.text, "");
+    assert.equal(finalCalled, false);
+    assert.equal(streaming._onTurnSettled, null, "hook is released once the wait ends");
+  }
+});
+
+test("a socket that closes during the commit wait ends the stop at once with the accumulated text", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, socket, { model: "gpt-live-transcribe" });
+  streaming.sendAudio(Buffer.alloc(4800, 1));
+
+  const disconnecting = streaming.disconnect();
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.readyState = WS.CLOSED;
+  socket.emit("close", 1006, Buffer.from(""));
+  const result = await Promise.race([
+    disconnecting,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("stop stalled")), 500)),
+  ]);
+
+  assert.equal(result.text, "");
+  assert.equal(streaming.ws, null);
+});
+
+test("preconfigured sessions adopt the model the server minted (session.created echo) and never send session.update", async (t) => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const logs = captureLogs(t);
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+
+  const connected = streaming.connect({
+    apiKey: "cs-secret",
+    preconfigured: true,
+    // The desktop's BYOK default; the server decides the managed model and
+    // pins the language when it mints the secret.
+    model: "gpt-4o-mini-transcribe",
+    language: "de",
+    createSocket: async () => socket,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  socket.readyState = WS.OPEN;
+  socket.emit(
+    "message",
+    JSON.stringify({
+      type: "session.created",
+      session: {
+        audio: {
+          input: {
+            format: { type: "audio/pcm", rate: 24000 },
+            transcription: { model: "gpt-live-transcribe", language: null },
+            turn_detection: null,
+          },
+        },
+      },
+    })
+  );
+  await connected;
+
+  assert.equal(streaming.model, "gpt-live-transcribe");
+  assert.equal(sentEvents(socket, "session.update").length, 0);
+  const line = logs.find((entry) => entry.message.includes("session created (preconfigured)"));
+  assert.equal(line.meta.model, "gpt-live-transcribe");
+  assert.equal(line.meta.turnDetection, null);
+  streaming.cleanup();
+
+  // No echo (older servers, bare mocks): the caller's model stands.
+  const bare = new OpenAIRealtimeStreaming();
+  await connectPreconfigured(bare, makeFakeSocket(WS.CONNECTING));
+  assert.equal(bare.model, "gpt-4o-mini-transcribe");
+  bare.cleanup();
+});
+
+test("stop keeps the socket open until every committed VAD turn settles", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, socket, { model: "gpt-4o-mini-transcribe" });
+  const emit = (event) => socket.emit("message", JSON.stringify(event));
+  streaming.sendAudio(Buffer.alloc(4800, 1));
+  emit({ type: "input_audio_buffer.committed", item_id: "first" });
+  const stopping = streaming.disconnect();
+  emit({ type: "input_audio_buffer.committed", item_id: "tail", previous_item_id: "first" });
+  emit({
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: "first",
+    transcript: "First sentence.",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  try {
+    assert.equal(socket.readyState, WS.OPEN, "the earlier turn cannot close out the tail");
+    emit({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "tail",
+      transcript: "Last sentence.",
+    });
+    assert.equal((await stopping).text, "First sentence. Last sentence.");
+  } finally {
+    streaming.cleanup();
+    await stopping;
+  }
+});
+
+test("an empty stop commit still waits for an already committed VAD transcript", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, socket, { model: "gpt-4o-mini-transcribe" });
+  const emit = (event) => socket.emit("message", JSON.stringify(event));
+  streaming.sendAudio(Buffer.alloc(4800, 1));
+  emit({ type: "input_audio_buffer.committed", item_id: "vad-turn" });
+  const stopping = streaming.disconnect();
+  emit({
+    type: "error",
+    error: { code: "input_audio_buffer_commit_empty", message: "buffer too small" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  try {
+    assert.equal(socket.readyState, WS.OPEN, "an empty buffer says nothing about pending ASR");
+    emit({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "vad-turn",
+      transcript: "Already committed speech.",
+    });
+    assert.equal((await stopping).text, "Already committed speech.");
+  } finally {
+    streaming.cleanup();
+    await stopping;
+  }
+});
+
+test("a failed VAD turn settles only itself while another transcript is pending", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, socket, { model: "gpt-4o-mini-transcribe" });
+  const emit = (event) => socket.emit("message", JSON.stringify(event));
+  streaming.sendAudio(Buffer.alloc(4800, 1));
+  emit({ type: "input_audio_buffer.committed", item_id: "noisy" });
+  emit({ type: "input_audio_buffer.committed", item_id: "speech" });
+  const stopping = streaming.disconnect();
+  emit({
+    type: "error",
+    error: { code: "input_audio_buffer_commit_empty", message: "commit_empty" },
+  });
+  emit({
+    type: "conversation.item.input_audio_transcription.failed",
+    item_id: "noisy",
+    error: { code: "audio_unintelligible", message: "audio too noisy" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  try {
+    assert.equal(socket.readyState, WS.OPEN, "a failed turn cannot discard another turn");
+    emit({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "speech",
+      transcript: "Keep this speech.",
+    });
+    assert.equal((await stopping).text, "Keep this speech.");
+  } finally {
+    streaming.cleanup();
+    await stopping;
+  }
+});
+
+test("an earlier final cannot finish stop before the trailing commit is acknowledged", async () => {
+  const OpenAIRealtimeStreaming = (await load()).default;
+  const streaming = new OpenAIRealtimeStreaming();
+  const socket = makeFakeSocket(WS.CONNECTING);
+  await connectByok(streaming, socket, { model: "gpt-4o-mini-transcribe" });
+  const emit = (event) => socket.emit("message", JSON.stringify(event));
+  streaming.sendAudio(Buffer.alloc(4800, 1));
+  emit({ type: "input_audio_buffer.committed", item_id: "earlier" });
+  const stopping = streaming.disconnect();
+  emit({
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: "earlier",
+    transcript: "Earlier speech.",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  try {
+    assert.equal(socket.readyState, WS.OPEN, "stop must still await its own commit response");
+    emit({ type: "input_audio_buffer.committed", item_id: "tail", previous_item_id: "earlier" });
+    emit({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "tail",
+      transcript: "Trailing speech.",
+    });
+    assert.equal((await stopping).text, "Earlier speech. Trailing speech.");
+  } finally {
+    streaming.cleanup();
+    await stopping;
+  }
 });

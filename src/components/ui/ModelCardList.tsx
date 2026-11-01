@@ -1,9 +1,10 @@
-import { Globe, Download, Trash2, X, ExternalLink } from "lucide-react";
+import { Globe, Download, Trash2, X, ExternalLink } from "../icons";
 import { useTranslation } from "react-i18next";
 import { Button } from "./button";
 import { cn } from "../lib/utils";
 import type { ColorScheme } from "../../utils/modelPickerStyles";
 import { createExternalLinkHandler, withUtm } from "../../utils/externalLinks";
+import { isListedModel } from "../../models/legacyModels";
 
 export interface ModelCardOption {
   value: string;
@@ -18,7 +19,10 @@ export interface ModelCardOption {
   // Local model properties (optional)
   isDownloaded?: boolean;
   isDownloading?: boolean;
+  isCancelling?: boolean;
   recommended?: boolean;
+  // Shown grayed out and can't be picked; a downloaded one can still be deleted.
+  legacy?: boolean;
 }
 
 const COLOR_CONFIG: Record<
@@ -32,15 +36,18 @@ const COLOR_CONFIG: Record<
     selected:
       "border-primary/30 bg-primary/8 dark:bg-primary/6 dark:border-primary/20 shadow-[0_0_0_1px_oklch(0.62_0.22_260/0.12),0_0_10px_-3px_oklch(0.62_0.22_260/0.18)]",
     default:
-      "border-border bg-surface-1 hover:border-border-hover hover:bg-muted dark:border-white/5 dark:bg-white/3 dark:hover:border-white/20 dark:hover:bg-white/8",
+      "border-border bg-surface-1 hover:border-border-hover hover:bg-muted dark:border-white/10 dark:bg-white/3 dark:hover:border-white/20 dark:hover:bg-white/8",
   },
   blue: {
     selected:
       "border-primary/30 bg-primary/10 dark:bg-primary/6 shadow-[0_0_0_1px_oklch(0.62_0.22_260/0.15),0_0_12px_-3px_oklch(0.62_0.22_260/0.2)]",
     default:
-      "border-border bg-surface-1 hover:border-border-hover hover:bg-muted dark:border-white/5 dark:bg-white/3 dark:hover:border-white/20 dark:hover:bg-white/8",
+      "border-border bg-surface-1 hover:border-border-hover hover:bg-muted dark:border-white/10 dark:bg-white/3 dark:hover:border-white/20 dark:hover:bg-white/8",
   },
 };
+
+// The default card without its hover lift: a legacy card can't be picked.
+const LEGACY_CARD_CLASS = "border-border bg-surface-1 dark:border-white/10 dark:bg-white/3";
 
 interface ModelCardProps {
   model: ModelCardOption;
@@ -53,9 +60,7 @@ interface ModelCardProps {
   // Local model actions (optional - when provided, enables local model UI)
   onDownload?: (modelId: string) => void;
   onDelete?: (modelId: string) => void;
-  onCancelDownload?: () => void;
-  isCancelling?: boolean;
-  isInstalling?: boolean;
+  onCancelDownload?: (modelId: string) => void;
 }
 
 export function ModelCard({
@@ -67,24 +72,19 @@ export function ModelCard({
   onDownload,
   onDelete,
   onCancelDownload,
-  isCancelling = false,
-  isInstalling = false,
 }: ModelCardProps) {
   const { t } = useTranslation();
   const styles = COLOR_CONFIG[colorScheme];
   const isLocalMode = Boolean(onDownload);
   const isDownloaded = model.isDownloaded;
   const isDownloading = model.isDownloading;
+  const modelIsCancelling = model.isCancelling ?? false;
+  const isLegacy = Boolean(model.legacy);
+  const isSelectable = !isLegacy && (!isLocalMode || (isDownloaded && !isSelected));
   const specHref = model.specUrl ? withUtm(model.specUrl, "model_spec") : undefined;
 
   const handleCardClick = () => {
-    if (isLocalMode) {
-      if (isDownloaded && !isSelected) {
-        onSelect(model.value);
-      }
-    } else {
-      onSelect(model.value);
-    }
+    if (isSelectable) onSelect(model.value);
   };
 
   const getStatusDotClass = () => {
@@ -107,9 +107,11 @@ export function ModelCard({
   return (
     <div
       onClick={handleCardClick}
-      className={`relative w-full p-2 rounded-md border text-left transition-colors duration-200 group overflow-hidden ${
-        isSelected ? styles.selected : styles.default
-      } ${!isLocalMode || (isDownloaded && !isSelected) ? "cursor-pointer" : ""}`}
+      title={isLegacy ? t("models.legacyHint") : undefined}
+      aria-disabled={isLegacy || undefined}
+      className={`relative w-full p-2 rounded-md border text-start transition-colors duration-200 group overflow-hidden ${
+        isSelected ? styles.selected : isLegacy ? LEGACY_CARD_CLASS : styles.default
+      } ${isSelectable ? "cursor-pointer" : ""}`}
     >
       <div className="flex items-center gap-1.5">
         <div
@@ -134,8 +136,10 @@ export function ModelCard({
         )}
 
         <span
+          dir="ltr"
           className={cn(
-            "text-sm font-semibold text-foreground truncate tracking-tight",
+            "text-sm font-semibold truncate tracking-tight",
+            isLegacy ? "text-muted-foreground" : "text-foreground",
             truncateDescription && (model.description ? "shrink-0 max-w-[60%]" : "min-w-0 flex-1")
           )}
         >
@@ -145,8 +149,8 @@ export function ModelCard({
           <span
             className={
               truncateDescription
-                ? "text-xs text-muted-foreground/60 truncate min-w-0 flex-1"
-                : "text-xs text-muted-foreground/50 tabular-nums shrink-0"
+                ? "text-xs text-muted-foreground/70 truncate min-w-0 flex-1"
+                : "text-xs text-muted-foreground/70 tabular-nums shrink-0"
             }
           >
             {model.description}
@@ -168,8 +172,13 @@ export function ModelCard({
             {t("common.recommended")}
           </span>
         )}
+        {isLegacy && (
+          <span className="text-xs font-medium text-muted-foreground px-1.5 py-0.5 bg-muted rounded-sm shrink-0">
+            {t("models.legacy")}
+          </span>
+        )}
 
-        <div className="ml-auto flex items-center gap-1.5 shrink-0">
+        <div className="ms-auto flex items-center gap-1.5 shrink-0">
           {isSelected && (
             <span className="text-xs font-medium text-primary px-2 py-0.5 bg-primary/10 rounded-sm">
               {t("common.active")}
@@ -184,9 +193,9 @@ export function ModelCard({
                     e.stopPropagation();
                     onDelete?.(model.value);
                   }}
-                  size="sm"
+                  size="icon"
                   variant="ghost"
-                  className="h-6 w-6 p-0 text-muted-foreground/40 hover:text-destructive opacity-0 group-hover:opacity-100 transition-[color,opacity,transform] active:scale-95"
+                  className="size-6 text-muted-foreground/70 hover:text-destructive opacity-0 group-hover:opacity-100 transition-[color,opacity,transform] active:scale-95"
                 >
                   <Trash2 size={12} />
                 </Button>
@@ -194,17 +203,17 @@ export function ModelCard({
                 <Button
                   onClick={(e) => {
                     e.stopPropagation();
-                    onCancelDownload?.();
+                    onCancelDownload?.(model.value);
                   }}
-                  disabled={isCancelling || isInstalling}
+                  disabled={modelIsCancelling}
                   size="sm"
                   variant="outline"
                   className="h-6 px-2.5 text-xs text-destructive border-destructive/25 hover:bg-destructive/8"
                 >
-                  <X size={11} className="mr-0.5" />
-                  {isCancelling ? "..." : t("common.cancel")}
+                  <X size={11} className="me-0.5" />
+                  {modelIsCancelling ? "..." : t("common.cancel")}
                 </Button>
-              ) : (
+              ) : isLegacy ? null : (
                 <Button
                   onClick={(e) => {
                     e.stopPropagation();
@@ -214,7 +223,7 @@ export function ModelCard({
                   variant="default"
                   className="h-6 px-2.5 text-xs"
                 >
-                  <Download size={11} className="mr-1" />
+                  <Download size={11} className="me-1" />
                   {t("common.download")}
                 </Button>
               )}
@@ -236,9 +245,7 @@ interface ModelCardListProps {
   // Local model actions (optional - when provided, enables local model UI)
   onDownload?: (modelId: string) => void;
   onDelete?: (modelId: string) => void;
-  onCancelDownload?: () => void;
-  isCancelling?: boolean;
-  isInstalling?: boolean;
+  onCancelDownload?: (modelId: string) => void;
 }
 
 export default function ModelCardList({
@@ -251,18 +258,19 @@ export default function ModelCardList({
   onDownload,
   onDelete,
   onCancelDownload,
-  isCancelling = false,
-  isInstalling = false,
 }: ModelCardListProps) {
   const { t } = useTranslation();
+  const listedModels = models.filter((model) =>
+    isListedModel(model, model.value === selectedModel, model.isDownloaded)
+  );
 
-  if (models.length === 0) {
+  if (listedModels.length === 0) {
     return <p className="text-sm text-muted-foreground py-2">{t("models.noneAvailable")}</p>;
   }
 
   return (
     <div className={`space-y-0.5 ${className}`}>
-      {models.map((model) => (
+      {listedModels.map((model) => (
         <ModelCard
           key={model.value}
           model={model}
@@ -273,8 +281,6 @@ export default function ModelCardList({
           onDownload={onDownload}
           onDelete={onDelete}
           onCancelDownload={onCancelDownload}
-          isCancelling={isCancelling}
-          isInstalling={isInstalling}
         />
       ))}
     </div>

@@ -14,7 +14,7 @@ jobs:
     if: ${{ false }} # Linux packaging is outside the Enso community beta.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Get release version
         id: release

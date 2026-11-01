@@ -14,10 +14,6 @@ function makeHarness() {
   };
   const deps = {
     teams: {
-      create: async (workspaceId, input) => {
-        calls.push(["team.create", workspaceId, input]);
-        return { id: "new-team" };
-      },
       remove: async (teamId) => calls.push(["team.remove", teamId]),
       addMember: async (teamId, userId, role) =>
         calls.push(["team.addMember", teamId, userId, role]),
@@ -40,6 +36,14 @@ function makeHarness() {
       assignTeam: async (spaceId, teamId, access) =>
         calls.push(["space.assignTeam", spaceId, teamId, access]),
       unassignTeam: async (spaceId, teamId) => calls.push(["space.unassignTeam", spaceId, teamId]),
+      addMember: async (spaceId, userId, role) =>
+        calls.push(["space.addMember", spaceId, userId, role]),
+      setMemberRole: async (spaceId, userId, role) =>
+        calls.push(["space.setMemberRole", spaceId, userId, role]),
+      removeMember: async (spaceId, userId) => {
+        calls.push(["space.removeMember", spaceId, userId]);
+        return { removed: true, still_via_teams: [] };
+      },
     },
     local: {
       upsertSpaceFromCloud: async (space) => {
@@ -70,73 +74,47 @@ function makeHarness() {
   return { calls, cloudSpace, localSpace, deps };
 }
 
-test("createSpace orchestrates inline-team members, local settling, and sync", async () => {
+test("createSpace sends members and teams in one body, settles locally, and syncs", async () => {
   const { createSpaceActions } = await load();
   const { calls, deps, localSpace } = makeHarness();
-  deps.teams.addMember = async (teamId, userId) => {
-    calls.push(["team.addMember", teamId, userId]);
-    if (userId === "bad-user") throw new Error("member failed");
-  };
   const actions = createSpaceActions(deps);
 
-  const result = await actions.createSpace(
+  const space = await actions.createSpace(
     "workspace-1",
     { name: "Roadmap", emoji: "🧭" },
-    {
-      existingTeamIds: ["existing-team"],
-      newTeam: { name: "Product", memberIds: ["good-user", "bad-user"] },
-    }
+    { memberIds: ["user-1", "user-2"], teamIds: ["existing-team"] }
   );
 
-  assert.equal(result.space, localSpace);
-  assert.equal(result.failedMembers, 1);
-  assert.deepEqual(
-    calls.find(([name]) => name === "space.create"),
-    [
-      "space.create",
-      "workspace-1",
-      {
-        name: "Roadmap",
-        emoji: "🧭",
-        team_ids: ["existing-team", "new-team"],
-      },
-    ]
-  );
+  assert.equal(space, localSpace);
+  assert.deepEqual(calls[0], [
+    "space.create",
+    "workspace-1",
+    {
+      name: "Roadmap",
+      emoji: "🧭",
+      member_ids: ["user-1", "user-2"],
+      team_ids: ["existing-team"],
+    },
+  ]);
   assert.ok(calls.some((call) => call[0] === "local.upsert"));
   assert.ok(calls.some((call) => call[0] === "local.setStatus" && call[2] === "synced"));
   assert.deepEqual(calls.at(-1), ["sync", "manual"]);
 });
 
-test("createSpace removes an inline team when cloud space creation fails", async () => {
+test("createSpace leaves no local trace when the cloud create fails", async () => {
   const { createSpaceActions } = await load();
   const { calls, deps } = makeHarness();
   const failure = new Error("plan limit");
   deps.spaces.create = async () => {
     throw failure;
   };
-  // Cleanup is best-effort and must never replace the create failure.
-  deps.teams.remove = async (teamId) => {
-    calls.push(["team.remove", teamId]);
-    throw new Error("cleanup failed");
-  };
   const actions = createSpaceActions(deps);
 
   await assert.rejects(
-    actions.createSpace(
-      "workspace-1",
-      { name: "Roadmap" },
-      { existingTeamIds: [], newTeam: { name: "Product", memberIds: [] } }
-    ),
+    actions.createSpace("workspace-1", { name: "Roadmap" }, { memberIds: [], teamIds: [] }),
     failure
   );
-  assert.deepEqual(
-    calls.find(([name]) => name === "team.remove"),
-    ["team.remove", "new-team"]
-  );
-  assert.equal(
-    calls.some(([name]) => name === "local.upsert"),
-    false
-  );
+  assert.equal(calls.length, 0);
 });
 
 test("renameSpace rolls back a rejected cloud rename", async () => {
@@ -178,6 +156,56 @@ test("renameSpace leaves a server-successful rename pending when mirroring fails
     1,
     "a server-successful rename must not roll back locally"
   );
+});
+
+test("renameSpace keeps the mirror's access fields, which the rename response omits", async () => {
+  const { createSpaceActions } = await load();
+  const { deps } = makeHarness();
+  const capabilities = {
+    edit_notes: true,
+    manage_members: true,
+    manage_settings: true,
+    leave: true,
+  };
+  const teams = [{ id: "team-1", name: "Design", my_role: "admin" }];
+  const space = {
+    id: 7,
+    cloud_space_id: "cloud-space-1",
+    name: "Roadmap",
+    emoji: null,
+    my_role: "admin",
+    my_direct_role: null,
+    member_count: 4,
+    teams,
+    capabilities,
+  };
+  // PATCH /api/spaces/:id answers with the space row only.
+  deps.spaces.update = async (spaceId, updates) => ({
+    id: spaceId,
+    workspace_id: "ws-1",
+    slug: "roadmap",
+    description: null,
+    created_at: "2026-10-01T00:00:00.000Z",
+    updated_at: "2026-10-23T00:00:00.000Z",
+    ...updates,
+  });
+  let upserted = null;
+  deps.local.upsertSpaceFromCloud = async (row) => {
+    upserted = row;
+    return space;
+  };
+  const actions = createSpaceActions(deps);
+
+  assert.deepEqual(await actions.renameSpace(space, { name: "Plans", emoji: null }), {
+    success: true,
+  });
+  assert.equal(upserted.id, "cloud-space-1");
+  assert.equal(upserted.name, "Plans");
+  assert.equal(upserted.my_role, "admin");
+  assert.equal(upserted.my_direct_role, null);
+  assert.equal(upserted.member_count, 4);
+  assert.deepEqual(upserted.teams, teams);
+  assert.deepEqual(upserted.capabilities, capabilities);
 });
 
 test("deleteSpace archives and guards cloud rows before local purge", async () => {
@@ -243,6 +271,65 @@ test("team mutations refresh the full mirror and schedule sync only when needed"
   );
 });
 
+test("direct member mutations refresh the mirror and only leaving schedules sync", async () => {
+  const { createSpaceActions } = await load();
+  const { calls, deps, localSpace } = makeHarness();
+  const stillViaTeams = [{ team_id: "team-1", name: "Sales" }];
+  deps.spaces.removeMember = async (spaceId, userId) => {
+    calls.push(["space.removeMember", spaceId, userId]);
+    return { removed: true, still_via_teams: stillViaTeams };
+  };
+  const actions = createSpaceActions(deps);
+
+  await actions.setSpaceMemberRole(localSpace, "user-1", "admin");
+  const removed = await actions.removeSpaceMember(localSpace, "user-1");
+  const left = await actions.leaveSpace(localSpace, "me");
+
+  assert.deepEqual(removed.still_via_teams, stillViaTeams);
+  assert.deepEqual(left.still_via_teams, stillViaTeams);
+  assert.deepEqual(
+    calls.filter(([name]) => name.startsWith("space.")),
+    [
+      ["space.setMemberRole", "cloud-space-1", "user-1", "admin"],
+      ["space.mySpaces"],
+      ["space.removeMember", "cloud-space-1", "user-1"],
+      ["space.mySpaces"],
+      ["space.removeMember", "cloud-space-1", "me"],
+      ["space.mySpaces"],
+    ]
+  );
+  assert.equal(calls.filter(([name]) => name === "roster.invalidate").length, 3);
+  assert.equal(calls.filter(([name]) => name === "mirror.upsert").length, 3);
+  assert.deepEqual(
+    calls.filter(([name]) => name === "sync"),
+    [["sync", "manual"]],
+    "only leaving can revoke the caller's own container access"
+  );
+});
+
+test("addSpaceMembers reports partial failures and still refreshes the mirror", async () => {
+  const { createSpaceActions } = await load();
+  const { calls, deps, localSpace } = makeHarness();
+  deps.spaces.addMember = async (spaceId, userId) => {
+    calls.push(["space.addMember", spaceId, userId]);
+    if (userId === "bad-user") throw new Error("not in workspace");
+  };
+  const actions = createSpaceActions(deps);
+
+  const { failures } = await actions.addSpaceMembers(localSpace, ["good-user", "bad-user"]);
+
+  assert.equal(failures.length, 1);
+  assert.match(failures[0].message, /not in workspace/);
+  assert.deepEqual(
+    calls.filter(([name]) => name === "space.addMember"),
+    [
+      ["space.addMember", "cloud-space-1", "good-user"],
+      ["space.addMember", "cloud-space-1", "bad-user"],
+    ]
+  );
+  assert.ok(calls.some(([name]) => name === "mirror.upsert"));
+});
+
 test("addTeamMembers reports partial failures and still refreshes the mirror", async () => {
   const { createSpaceActions } = await load();
   const { calls, deps } = makeHarness();
@@ -263,9 +350,9 @@ test("team assignment rejects local-only spaces before making a cloud request", 
   const { calls, deps, localSpace } = makeHarness();
   const actions = createSpaceActions(deps);
 
-  await assert.rejects(
-    actions.assignTeamToSpace({ ...localSpace, cloud_space_id: null }, "team-1"),
-    /Not a cloud space/
-  );
+  const localOnly = { ...localSpace, cloud_space_id: null };
+  await assert.rejects(actions.assignTeamToSpace(localOnly, "team-1"), /Not a cloud space/);
+  await assert.rejects(actions.addSpaceMembers(localOnly, ["user-1"]), /Not a cloud space/);
+  await assert.rejects(actions.leaveSpace(localOnly, "me"), /Not a cloud space/);
   assert.equal(calls.length, 0);
 });

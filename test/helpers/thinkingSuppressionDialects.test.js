@@ -65,6 +65,16 @@ test("gemini gets reasoning_effort minimal and nothing else", async () => {
   assert.deepEqual(body, { reasoning_effort: "minimal" });
 });
 
+test("gemini models without minimal get reasoning_effort low", async () => {
+  const { suppressThinking } = await load();
+
+  for (const model of ["gemini-3.8-flash", "gemini-4-argon", "gemini-3.1-pro-preview"]) {
+    const body = {};
+    suppressThinking(body, "gemini", model);
+    assert.deepEqual(body, { reasoning_effort: "low" }, model);
+  }
+});
+
 test("openrouter gets its native reasoning toggle and nothing else", async () => {
   const { suppressThinking } = await load();
 
@@ -95,6 +105,31 @@ test("lan gets the nested reasoning object plus chat_template_kwargs", async () 
   });
 });
 
+test("lan sends a family's suppress floor inside the reasoning object, not a flat effort", async () => {
+  const { suppressThinking } = await load();
+
+  const body = {};
+  suppressThinking(body, "lan", "gpt-oss-20b-mxfp4");
+
+  assert.deepEqual(body, {
+    reasoning: { effort: "low" },
+    chat_template_kwargs: { enable_thinking: false },
+  });
+  assert.ok(!("reasoning_effort" in body), "flat reasoning_effort trips vLLM on lan (#1611)");
+});
+
+test("lan glm-5.3 floors at low: the family cannot disable reasoning", async () => {
+  const { suppressThinking } = await load();
+
+  const body = {};
+  suppressThinking(body, "lan", "glm-5.3-flash");
+
+  assert.deepEqual(body, {
+    reasoning: { effort: "low" },
+    chat_template_kwargs: { enable_thinking: false },
+  });
+});
+
 test("unlisted providers keep the legacy reasoning_effort none plus chat_template_kwargs", async () => {
   const { suppressThinking } = await load();
 
@@ -105,6 +140,30 @@ test("unlisted providers keep the legacy reasoning_effort none plus chat_templat
     reasoning_effort: "none",
     chat_template_kwargs: { enable_thinking: false },
   });
+});
+
+test("generic-dialect providers send gpt-oss the low floor, not the rejected none", async () => {
+  const { suppressThinking } = await load();
+
+  const body = {};
+  suppressThinking(body, "tinfoil", "gpt-oss-120b");
+
+  assert.deepEqual(body, {
+    reasoning_effort: "low",
+    chat_template_kwargs: { enable_thinking: false },
+  });
+});
+
+test("the gpt-oss floor covers the whole family case-insensitively", async () => {
+  const { suppressThinking } = await load();
+
+  const safeguard = {};
+  suppressThinking(safeguard, "tinfoil", "gpt-oss-safeguard-120b");
+  assert.equal(safeguard.reasoning_effort, "low");
+
+  const mixedCase = {};
+  suppressThinking(mixedCase, "openai", "GPT-OSS-20B");
+  assert.equal(mixedCase.reasoning_effort, "low");
 });
 
 test("mistral gets reasoning_effort none and never chat_template_kwargs", async () => {
@@ -171,4 +230,30 @@ test("detectEndpointDialect returns null for unparseable or missing input", asyn
   assert.equal(detectEndpointDialect(""), null);
   assert.equal(detectEndpointDialect(undefined), null);
   assert.equal(detectEndpointDialect(null), null);
+});
+
+test("deepseek hosts get the native thinking switch, never reasoning_effort (#1260)", async () => {
+  const { suppressThinking, detectEndpointDialect } = await load();
+
+  const dialect = detectEndpointDialect("https://api.deepseek.com/v1");
+  assert.deepEqual(dialect, { key: "deepseek", tokenParam: "max_tokens", supportsTemperature: true });
+
+  const body = {};
+  suppressThinking(body, "deepseek", "deepseek-chat");
+  assert.deepEqual(body, { thinking: { type: "disabled" } });
+});
+
+test("cerebras hosts are strict like groq: family effort only, no chat_template_kwargs (#831)", async () => {
+  const { suppressThinking, detectEndpointDialect } = await load();
+
+  const dialect = detectEndpointDialect("https://api.cerebras.ai/v1");
+  assert.equal(dialect?.key, "cerebras");
+
+  const gptOss = {};
+  suppressThinking(gptOss, "cerebras", "gpt-oss-120b");
+  assert.deepEqual(gptOss, { reasoning_effort: "low" });
+
+  const unknown = {};
+  suppressThinking(unknown, "cerebras", "llama-4-maverick");
+  assert.deepEqual(unknown, {});
 });
