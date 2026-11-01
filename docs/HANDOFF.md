@@ -1,6 +1,36 @@
 # Handoff — Enso Voice community beta
 
-Actualizado: 4 de agosto de 2026, America/Bogota.
+Actualizado: 1 de noviembre de 2026, America/Bogota (sección superior); resto del 4 de agosto.
+
+## Actualización 1 de noviembre de 2026 — sync con upstream
+
+Objetivo inmediato: usar Enso Voice para grabar reuniones, transcribirlas y
+guardarlas en el servidor Enso, además de transcribir audios y dictar.
+
+- Fork `mateofh/enso-voice`: merge de 796 commits de OpenWhispr hecho en local
+  (rama `enso/upstream-sync-2026-11`), 3 adelante / 0 detrás de upstream.
+  **Sin push todavía.** El árbol se copió a `Microapps/Enso-Voice` en la rama
+  `feat/enso-voice-upstream-sync`.
+- Validado con Node 24: quality-check, lint, i18n:check (11 idiomas) y la suite
+  completa: 10.222 aprobadas, 14 omitidas, 2 fallidas solo por falta de Xcode
+  Command Line Tools en la máquina (`swiftc`/`xcrun`).
+- API: `/api/streaming-usage` acepta `clientTranscriptionId` además de
+  `clientUsageId` (tests en `enso-voice-api/tests/idempotency.test.ts`).
+
+Pendientes nuevos detectados en el sync:
+
+1. **Límite de 4,5 MB por request en Vercel.** Las reuniones largas llegan solo
+   porque el cliente las parte en trozos de 4 MB; cada trozo se diariza aparte y
+   los `Speaker N` no son consistentes entre trozos. Diseño recomendado: subida a
+   almacenamiento (presigned URL) y transcripción completa desde URL en el servidor.
+2. **Better Auth:** cliente 1.7.14, API 1.6.25. Subir la API y regenerar el
+   esquema al crear la base real (Fase 1), antes de ejecutar migraciones.
+3. **Rutas que la app llama y la API no sirve:** `stt-config`,
+   `note-recording-config`, `analytics/*`, `leaderboard/*`, `shared-dictionary/*`,
+   `me/joinable`, `stt/orukeet/*`, `gemini-live-token`. Fallan sin bloquear
+   dictado, reuniones ni notas; el reporter de `activation/*` quedó apagado.
+4. Compartir notas (`shareNoteRules.ts`) sigue apuntando a `notes.openwhispr.com`;
+   está oculto y la API no lo implementa.
 
 ## Resultado actual
 
