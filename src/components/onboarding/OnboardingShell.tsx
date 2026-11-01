@@ -380,7 +380,7 @@ export function CompactOnboardingFrame({
         <p className="relative z-10 mx-auto mt-auto w-full max-w-sm shrink-0 px-2 pb-4 pt-5 text-center text-xs leading-[18px] text-[var(--onboarding-text-secondary)]">
           {t("auth.legal.prefix")}{" "}
           <a
-            href="https://ensovoice.com/terms"
+            href="https://beenso.com/es/terminos"
             target="_blank"
             rel="noopener noreferrer"
             className="text-[var(--onboarding-link)] transition-colors hover:opacity-80"
@@ -389,7 +389,7 @@ export function CompactOnboardingFrame({
           </a>{" "}
           {t("auth.legal.and")}{" "}
           <a
-            href="https://ensovoice.com/privacy"
+            href="https://beenso.com/es/privacidad"
             target="_blank"
             rel="noopener noreferrer"
             className="text-[var(--onboarding-link)] transition-colors hover:opacity-80"

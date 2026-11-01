@@ -54,7 +54,7 @@ export default function SupportDropdown({ className, trigger }: SupportDropdownP
         )}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => openExternal("https://ensovoice.com/docs")}>
+        <DropdownMenuItem onClick={() => openExternal("https://beenso.com/es")}>
           <BookOpen className="me-2 h-4 w-4" />
           {t("support.documentation")}
         </DropdownMenuItem>
@@ -64,9 +64,9 @@ export default function SupportDropdown({ className, trigger }: SupportDropdownP
         </DropdownMenuItem>
         <DropdownMenuItem
           onClick={async () => {
-            const result = await window.electronAPI?.openExternal("mailto:support@ensovoice.com");
+            const result = await window.electronAPI?.openExternal("mailto:hola@beenso.com");
             if (!result?.success) {
-              openExternal("https://mail.google.com/mail/?view=cm&to=support@ensovoice.com");
+              openExternal("https://mail.google.com/mail/?view=cm&to=hola@beenso.com");
             }
           }}
         >

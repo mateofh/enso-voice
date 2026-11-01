@@ -487,7 +487,7 @@
       "systemAudioDescription": "Lässt den Meeting-Rekorder die Gegenseite deiner Anrufe hören — Meetings, Vorlesungen, Podcasts. Kann später in den Einstellungen aktiviert werden.",
       "optional": "Optional",
       "recommended": "Empfohlen",
-      "accessibilityTroubleshooting": "Schalte in Systemeinstellungen → Bedienungshilfen den Schalter für Enso Voice aus und wieder ein. Wenn Enso Voice gar nicht in der Liste steht, klicke auf + und füge es aus dem Programme-Ordner hinzu. Klappt's immer noch nicht? Schreib an support@ensovoice.com."
+      "accessibilityTroubleshooting": "Schalte in Systemeinstellungen → Bedienungshilfen den Schalter für Enso Voice aus und wieder ein. Wenn Enso Voice gar nicht in der Liste steht, klicke auf + und füge es aus dem Programme-Ordner hinzu. Klappt's immer noch nicht? Schreib an hola@beenso.com."
     },
     "transcription": {
       "title": "Transkriptions-Einrichtung",
@@ -607,7 +607,7 @@
       "cloudUnreachable": {
         "title": "Enso Cloud nicht erreichbar",
         "generic": "Die Netzwerkanfrage ist fehlgeschlagen. Prüfen Sie Ihre Verbindung.",
-        "dnsBlocked": "DNS löst ensovoice.com nicht auf — ein Werbeblocker oder Filter blockiert es möglicherweise.",
+        "dnsBlocked": "DNS löst beenso.com nicht auf — ein Werbeblocker oder Filter blockiert es möglicherweise.",
         "refused": "Verbindung wurde abgelehnt — wahrscheinlich eine Firewall oder ein VPN.",
         "timeout": "Netzwerk-Zeitüberschreitung — VPN, Captive Portal oder instabile Verbindung.",
         "tls": "TLS-Handshake fehlgeschlagen — prüfen Sie Ihre Systemuhr oder einen Unternehmens-Proxy.",

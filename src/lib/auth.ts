@@ -10,7 +10,7 @@ import {
   prepareAuthRequest,
 } from "./authRequestContext";
 
-export const AUTH_URL = import.meta.env.VITE_AUTH_URL || "https://auth.ensovoice.com";
+export const AUTH_URL = import.meta.env.VITE_AUTH_URL || "https://voice.beenso.com";
 export const authClient = createAuthClient({
   baseURL: AUTH_URL,
   plugins: [ssoClient()],
@@ -176,7 +176,7 @@ export async function withSessionRefresh<T>(operation: () => Promise<T>): Promis
   }
 }
 
-const DESKTOP_OAUTH_CALLBACK_URL = "https://ensovoice.com/auth/desktop-callback";
+const DESKTOP_OAUTH_CALLBACK_URL = "https://voice.beenso.com/auth/desktop-callback";
 
 export async function signInWithSocial(provider: SocialProvider): Promise<{ error?: Error }> {
   try {
@@ -230,7 +230,7 @@ export async function requestPasswordReset(email: string): Promise<{ error?: Err
   try {
     const { error } = await authClient.requestPasswordReset({
       email: email.trim(),
-      redirectTo: "https://ensovoice.com/reset-password",
+      redirectTo: "https://voice.beenso.com/reset-password",
     });
     if (error) {
       return { error: toAuthActionError(error, "Failed to send reset email") };

@@ -1,6 +1,5 @@
 const OPENWHISPR_HOST_PATTERNS = [
-  "https://auth.ensovoice.com/*",
-  "https://api.ensovoice.com/*",
+  "https://voice.beenso.com/*",
   "http://localhost:3000/*",
   "http://127.0.0.1:3000/*",
   "http://localhost:8787/*",

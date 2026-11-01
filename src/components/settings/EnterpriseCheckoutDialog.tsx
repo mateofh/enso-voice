@@ -27,7 +27,7 @@ import { openExternalLink } from "../../utils/externalLinks";
 import type { Workspace } from "../../types/electron";
 
 const SEAT_LIMIT = 500;
-const CONTACT_SALES_URL = "https://ensovoice.com/contact";
+const CONTACT_SALES_URL = "https://beenso.com/es";
 
 // The API's coded billing refusals, localized; uncoded errors fall back to
 // the server's own message.

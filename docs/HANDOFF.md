@@ -17,6 +17,18 @@ guardarlas en el servidor Enso, además de transcribir audios y dictar.
 - API: `/api/streaming-usage` acepta `clientTranscriptionId` además de
   `clientUsageId` (tests en `enso-voice-api/tests/idempotency.test.ts`).
 
+Dominio confirmado: **beenso.com**. Mapa aplicado en app y API:
+
+- API y auth en un solo host: `https://voice.beenso.com` (staging:
+  `https://staging-voice.beenso.com`, solo por variable de entorno).
+- Cookie de sesión limitada a ese host (`COOKIE_DOMAIN` sin definir). Nunca
+  `beenso.com`: la recibirían la web y todas las microapps.
+- Privacidad y términos: `beenso.com/es/privacidad` y `beenso.com/es/terminos`.
+  Falta confirmar que cubran audio, transcripciones y notas.
+- Soporte: `hola@beenso.com`. Remitente de correos: `voice@beenso.com`, que
+  requiere verificar `beenso.com` en Resend.
+- El esquema `ensovoice://` y los nombres de cookie no son dominios y no cambian.
+
 Pendientes nuevos detectados en el sync:
 
 1. **Límite de 4,5 MB por request en Vercel.** Las reuniones largas llegan solo
@@ -31,6 +43,10 @@ Pendientes nuevos detectados en el sync:
    dictado, reuniones ni notas; el reporter de `activation/*` quedó apagado.
 4. Compartir notas (`shareNoteRules.ts`) sigue apuntando a `notes.openwhispr.com`;
    está oculto y la API no lo implementa.
+5. **No existe la página para restablecer contraseña.** El correo de reset
+   redirige a `voice.beenso.com/reset-password`; hay que servir esa página desde
+   la API antes de abrir la beta. Lo mismo vale para `/auth/desktop-callback`
+   cuando se active el login social.
 
 ## Resultado actual
 

@@ -487,7 +487,7 @@
       "systemAudioDescription": "Permite que el grabador de reuniones escuche al resto de participantes de tus llamadas: reuniones, clases, pódcasts. Puedes activarlo más tarde en Ajustes.",
       "optional": "Opcional",
       "recommended": "Recomendado",
-      "accessibilityTroubleshooting": "En Configuración del Sistema → Accesibilidad, desactiva el interruptor de Enso Voice y vuelve a activarlo. Si Enso Voice no aparece en la lista, haz clic en + y añádelo desde la carpeta Aplicaciones. ¿Sigues con problemas? Escribe a support@ensovoice.com."
+      "accessibilityTroubleshooting": "En Configuración del Sistema → Accesibilidad, desactiva el interruptor de Enso Voice y vuelve a activarlo. Si Enso Voice no aparece en la lista, haz clic en + y añádelo desde la carpeta Aplicaciones. ¿Sigues con problemas? Escribe a hola@beenso.com."
     },
     "transcription": {
       "title": "Configuración de transcripción",
@@ -607,7 +607,7 @@
       "cloudUnreachable": {
         "title": "No se puede conectar con Enso Cloud",
         "generic": "La solicitud de red falló. Comprueba tu conexión.",
-        "dnsBlocked": "El DNS no resuelve ensovoice.com: puede que un bloqueador de anuncios o un filtro lo esté bloqueando.",
+        "dnsBlocked": "El DNS no resuelve beenso.com: puede que un bloqueador de anuncios o un filtro lo esté bloqueando.",
         "refused": "La conexión fue rechazada: probablemente un firewall o una VPN.",
         "timeout": "Se agotó el tiempo de la red: VPN, portal cautivo o conexión inestable.",
         "tls": "Falló el handshake TLS: revisa el reloj del sistema o un proxy corporativo.",

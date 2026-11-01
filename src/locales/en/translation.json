@@ -487,7 +487,7 @@
       "systemAudioDescription": "Lets the meeting recorder hear the other side of your calls — meetings, lectures, podcasts. You can turn this on later in Settings.",
       "optional": "Optional",
       "recommended": "Recommended",
-      "accessibilityTroubleshooting": "In System Settings → Accessibility, switch Enso Voice's toggle off and back on. If Enso Voice isn't in the list at all, click + and add it from your Applications folder. Still stuck? Email support@ensovoice.com."
+      "accessibilityTroubleshooting": "In System Settings → Accessibility, switch Enso Voice's toggle off and back on. If Enso Voice isn't in the list at all, click + and add it from your Applications folder. Still stuck? Email hola@beenso.com."
     },
     "transcription": {
       "title": "Transcription Setup",
@@ -607,7 +607,7 @@
       "cloudUnreachable": {
         "title": "Can't reach Enso Cloud",
         "generic": "Network request failed. Check your connection.",
-        "dnsBlocked": "DNS isn't resolving ensovoice.com — an ad blocker or filter may be blocking it.",
+        "dnsBlocked": "DNS isn't resolving beenso.com — an ad blocker or filter may be blocking it.",
         "refused": "Connection was refused — likely a firewall or VPN.",
         "timeout": "Network timed out — VPN, captive portal, or unstable connection.",
         "tls": "TLS handshake failed — check your system clock or for a corporate proxy.",

@@ -487,7 +487,7 @@
       "systemAudioDescription": "Permette al registratore delle riunioni di sentire l'altro lato delle tue chiamate — riunioni, lezioni, podcast. Puoi attivarlo più tardi nelle Impostazioni.",
       "optional": "Facoltativo",
       "recommended": "Consigliato",
-      "accessibilityTroubleshooting": "In Impostazioni di Sistema → Accessibilità, disattiva l'interruttore di Enso Voice e riattivalo. Se Enso Voice non compare nell'elenco, fai clic su + e aggiungilo dalla cartella Applicazioni. Ancora problemi? Scrivi a support@ensovoice.com."
+      "accessibilityTroubleshooting": "In Impostazioni di Sistema → Accessibilità, disattiva l'interruttore di Enso Voice e riattivalo. Se Enso Voice non compare nell'elenco, fai clic su + e aggiungilo dalla cartella Applicazioni. Ancora problemi? Scrivi a hola@beenso.com."
     },
     "transcription": {
       "title": "Configurazione trascrizione",
@@ -607,7 +607,7 @@
       "cloudUnreachable": {
         "title": "Impossibile raggiungere Enso Cloud",
         "generic": "La richiesta di rete è fallita. Controlla la connessione.",
-        "dnsBlocked": "Il DNS non risolve ensovoice.com — potrebbe esserci un ad blocker o un filtro.",
+        "dnsBlocked": "Il DNS non risolve beenso.com — potrebbe esserci un ad blocker o un filtro.",
         "refused": "Connessione rifiutata — probabilmente un firewall o una VPN.",
         "timeout": "Timeout di rete — VPN, captive portal o connessione instabile.",
         "tls": "Handshake TLS fallito — controlla l'orologio di sistema o un proxy aziendale.",

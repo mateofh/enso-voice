@@ -2836,7 +2836,7 @@ export default function SettingsPage({
                             size="sm"
                             className="w-full h-6 text-[10px] text-muted-foreground"
                             onClick={() =>
-                              window.electronAPI?.openExternal?.("https://ensovoice.com/contact")
+                              window.electronAPI?.openExternal?.("https://beenso.com/es")
                             }
                           >
                             <Mail size={10} />
@@ -2850,7 +2850,7 @@ export default function SettingsPage({
                             size="sm"
                             className="w-full h-6 text-[10px]"
                             onClick={() =>
-                              window.electronAPI?.openExternal?.("https://ensovoice.com/contact")
+                              window.electronAPI?.openExternal?.("https://beenso.com/es")
                             }
                           >
                             <Mail size={10} />
@@ -2870,7 +2870,7 @@ export default function SettingsPage({
                           size="sm"
                           className="mt-2 w-full h-6 text-[10px]"
                           onClick={() =>
-                            window.electronAPI?.openExternal?.("https://ensovoice.com/contact")
+                            window.electronAPI?.openExternal?.("https://beenso.com/es")
                           }
                         >
                           <Mail size={10} />

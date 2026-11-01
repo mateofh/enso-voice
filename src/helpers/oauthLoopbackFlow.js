@@ -3,7 +3,7 @@ const crypto = require("crypto");
 const { openExternalUrl } = require("./externalUrlOpener");
 
 const OAUTH_TIMEOUT_MS = 120000;
-const DEFAULT_DESKTOP_CALLBACK_URL = "https://ensovoice.com/auth/desktop-callback";
+const DEFAULT_DESKTOP_CALLBACK_URL = "https://voice.beenso.com/auth/desktop-callback";
 
 const PROTOCOL_BY_CHANNEL = {
   development: "openwhispr-dev",
